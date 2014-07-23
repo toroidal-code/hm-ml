@@ -1,11 +1,12 @@
 module Expr = struct
   type t =
-    | Ident  of string
-    | Apply  of t * t
-    | Lambda of string * t
-    | Let    of string * t * t
-    | Letrec of string * t * t
-    | None
+    | Ident    of string
+    | Apply    of t * t
+    | Lambda   of string * t
+    | Function of string list * t
+    | Fragment of string * t
+    | Let      of string * t * t
+    | Letrec   of string * t * t
 
   let rec to_string = function 
     | Ident s -> s
@@ -20,7 +21,14 @@ module Expr = struct
 
     | Letrec (v, defn, body) ->
       Printf.sprintf "(let rec %s = %s in %s)" v (to_string defn) (to_string body)
-    | None -> "None"
+
+    | Function (vl, body) ->
+      Printf.sprintf "(fn%s = %s)" 
+        (List.fold_left (fun a b -> a ^ " " ^ b ) "" vl)
+        (to_string body)
+ 
+    | Fragment (v, body) ->
+      Printf.sprintf "%s" (to_string body)
 end
 
 type env = 
@@ -103,7 +111,9 @@ end = struct
     | [] -> t.name
 
     | hd::tl::[] -> 
-      Printf.sprintf "(%s %s %s)" (TypeParameter.to_string hd) t.name (TypeParameter.to_string tl)
+      let hd_name = (TypeParameter.to_string hd) in
+      let tl_name = (TypeParameter.to_string tl) in
+      Printf.sprintf "(%s %s %s)" hd_name t.name tl_name
 
     | _ -> 
       t.types
@@ -134,15 +144,32 @@ end = struct
     | Tp_top top -> TypeOperator.to_string top
 end
 
-and Function : sig 
+and Fun : sig 
   val create: TypeParameter.t -> TypeParameter.t -> TypeParameter.t
 end = struct
   let create from_type to_type =
     TypeParameter.Tp_top
     {
-      TypeOperator.name = "->";
+      TypeOperator.name  = "->";
       TypeOperator.types = [from_type; to_type]
     }
+end
+and Function : sig
+  val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
+end = struct
+  let create from_types to_type = 
+    match from_types with 
+    | x::xs ->
+      TypeParameter.Tp_top 
+      {
+        TypeOperator.name  = "$>";
+        TypeOperator.types = [
+          (List.fold_left Fun.create x xs);
+          to_type
+        ]
+          
+      }
+    | _ -> assert false
 end
 
 
@@ -172,26 +199,37 @@ exception ParseError of string
 exception TypeError of string
 exception UnificationError of string
 
+let rec analyse_lowest_fragment node env non_generic =
+  match node with
+  | Expr.Fragment (_,b) -> analyse_lowest_fragment b env non_generic
+  | e -> analyse e env non_generic 
 
-let rec analyse node env non_generic = 
+and analyse_highest_fragment node env non_generic =
+  match node with
+  | Expr.Function(_,b) -> analyse_highest_fragment b env non_generic
+  | e -> analyse e env non_generic 
+
+and analyse node env non_generic = 
   match node with
   | Expr.Ident name -> get_type name env non_generic
 
   | Expr.Apply (fn, arg) -> 
-    let fun_type = analyse fn env non_generic in
-    let arg_type = analyse arg env non_generic in
+    (* let fun_type = analyse fn env non_generic in *)
+    let fun_type = analyse_highest_fragment fn env non_generic in
+    let arg_type = analyse_highest_fragment arg env non_generic in
     let result_type = TypeVariable.create () in
     let result_type_param = TypeParameter.Tp_tvar result_type in
-    unify (Function.create arg_type result_type_param) fun_type;
+    unify (Fun.create arg_type result_type_param) fun_type;
     result_type_param
-
+    
+  | Expr.Fragment(v, body) 
   | Expr.Lambda (v, body) -> 
     let arg_type = TypeVariable.create () in
     let arg_type_param = TypeParameter.Tp_tvar arg_type in
     let new_env  = StringMap.add v arg_type_param env in
     let new_non_generic = TVSet.add arg_type non_generic in
     let result_type = analyse body new_env new_non_generic in
-    Function.create arg_type_param result_type
+    Fun.create arg_type_param result_type
                                      
   | Expr.Let (v, defn, body) ->
     let defn_type = analyse defn env non_generic in
@@ -207,7 +245,14 @@ let rec analyse node env non_generic =
     unify new_type_param defn_type;
     analyse body new_env non_generic
 
-  | Expr.None -> assert false
+  | Expr.Function (vl, body) ->
+    let arg_types = List.map (fun _ -> TypeVariable.create ()) vl in
+    let arg_type_params = List.map (fun t -> TypeParameter.Tp_tvar t) arg_types in
+    let new_env = List.fold_left2 (fun m e at -> StringMap.add e at m) env vl arg_type_params in
+    let new_non_generic = List.fold_left (fun s e -> TVSet.add e s) non_generic arg_types in
+    (* let result_type = analyse body new_env new_non_generic in *)
+    let result_type = analyse_lowest_fragment body new_env new_non_generic in
+    Function.create arg_type_params result_type
 
 and get_type name env non_generic =
    if StringMap.mem name env then
@@ -310,14 +355,14 @@ let () =
   let var3      = TypeParameter.Tp_tvar (TypeVariable.create ()) in
   let my_env = 
     StringMap.empty
-    |> StringMap.add "pair" (Function.create var1 (Function.create var2 pair_type))
+    |> StringMap.add "pair" (Fun.create var1 (Fun.create var2 pair_type))
     |> StringMap.add "true" my_bool
-    |> StringMap.add "cond" (Function.create my_bool 
-                               (Function.create var3 
-                                  (Function.create var3 var3)))
-    |> StringMap.add "zero" (Function.create my_int my_bool)
-    |> StringMap.add "pred" (Function.create my_int my_int)
-    |> StringMap.add "times" (Function.create my_int (Function.create my_int my_int))
+    |> StringMap.add "cond" (Fun.create my_bool 
+                               (Fun.create var3 
+                                  (Fun.create var3 var3)))
+    |> StringMap.add "zero" (Fun.create my_int my_bool)
+    |> StringMap.add "pred" (Fun.create my_int my_int)
+    |> StringMap.add "times" (Fun.create my_int (Fun.create my_int my_int))
   in
   let pair =
     (Expr.Apply
@@ -334,9 +379,9 @@ let () =
     [
       (* factorial *)
       (Expr.Letrec              (* letrec factorial = *)
-         ("factorial",          
+         ("factorial",
           Expr.Lambda           (* fun n -> *)
-            ("n", 
+            ("n",
              Expr.Apply (
                Expr.Apply (     (* cond (zero n) 1 *)
                  Expr.Apply     (* cond (zero n) *)
@@ -346,7 +391,7 @@ let () =
                Expr.Apply (     (* times n *)
                  Expr.Apply (Expr.Ident "times", Expr.Ident "n"),
                  Expr.Apply (
-                   Expr.Ident "factorial", 
+                   Expr.Ident "factorial",
                    Expr.Apply (Expr.Ident "pred", Expr.Ident "n")
                  )))),          (* in *)
           Expr.Apply (Expr.Ident "factorial", Expr.Ident "5")));
@@ -389,16 +434,42 @@ let () =
       
       (* function composition *)
       (* fun f -> fun g -> fun arg -> f g arg *)
-      Expr.Lambda("f", 
-        Expr.Lambda("g", 
-          Expr.Lambda("arg", 
+      Expr.Lambda("f",
+        Expr.Lambda("g",
+          Expr.Lambda("arg",
             Expr.Apply(
-              Expr.Ident "g", 
+              Expr.Ident "g",
               Expr.Apply(
-                Expr.Ident "f", 
-                Expr.Ident "arg")))))
+                Expr.Ident "f",
+                Expr.Ident "arg")))));
 
+      Expr.Function(
+        ["f"],
+        Expr.Fragment(
+          "f",
+          Expr.Lambda("g", Expr.Ident "g")));
+      
+      Expr.Apply(
+        Expr.Function(
+          ["f"],
+          Expr.Fragment(
+            "f",
+            Expr.Lambda("g", Expr.Ident "g"))),
+        Expr.Ident "true");
 
+      Expr.Function(
+        ["f"; "g"],
+        Expr.Fragment(
+          "f",
+          Expr.Fragment(
+            "g",
+            Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
+
+        Expr.Lambda(
+          "f", 
+          Expr.Lambda(
+            "g", 
+            Expr.Apply(Expr.Ident "g", Expr.Ident "f")))
     ]
   in
   List.iter (fun ex -> try_exp my_env ex) examples

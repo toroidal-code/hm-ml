@@ -74,7 +74,7 @@ end = struct
   
   let to_string tv = 
     match tv.instance with
-    | None -> tv.name
+    | None -> name tv
     | Some i -> TypeParameter.to_string i
 
   let compare t1 t2 = t2.id - t1.id
@@ -257,11 +257,14 @@ and unify t1 t2 : unit =
   | (TypeParameter.Tp_top(top), TypeParameter.Tp_tvar(tv)) ->
     unify b a
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
-    if (top1.TypeOperator.name <> top2.TypeOperator.name ||
-        (List.length top1.TypeOperator.types) <> (List.length top2.TypeOperator.types)) 
-    then raise (TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " <> " ^ (TypeOperator.to_string top2)));
+    let top1_name = top1.TypeOperator.name in
+    let top2_name = top2.TypeOperator.name in
+    let top1_types_size = (List.length top1.TypeOperator.types) in
+    let top2_types_size = (List.length top2.TypeOperator.types) in
+    if ((top1_name <> top2_name) || (top1_types_size <> top2_types_size )) 
+    then raise (TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2)));
     List.iter2 unify (top1.TypeOperator.types) (top2.TypeOperator.types)
-(* | _ -> raise (UnificationError "Not unified") *)
+  (* | _ -> raise (UnificationError "Not unified") *)
       
 and prune (t:TypeParameter.t) = 
   match t with
@@ -329,23 +332,73 @@ let () =
   
   let examples =
     [
-      (Expr.Letrec 
-         ("factorial", 
-          Expr.Lambda 
+      (* factorial *)
+      (Expr.Letrec              (* letrec factorial = *)
+         ("factorial",          
+          Expr.Lambda           (* fun n -> *)
             ("n", 
              Expr.Apply (
-               Expr.Apply (
-                 Expr.Apply 
-                   (Expr.Ident "cond", 
+               Expr.Apply (     (* cond (zero n) 1 *)
+                 Expr.Apply     (* cond (zero n) *)
+                   (Expr.Ident "cond",
                     Expr.Apply (Expr.Ident "zero", Expr.Ident "n")),
                  Expr.Ident "1"),
-               Expr.Apply (
+               Expr.Apply (     (* times n *)
                  Expr.Apply (Expr.Ident "times", Expr.Ident "n"),
                  Expr.Apply (
                    Expr.Ident "factorial", 
                    Expr.Apply (Expr.Ident "pred", Expr.Ident "n")
-                 )))),
-          Expr.Apply (Expr.Ident "factorial", Expr.Ident "5")))
+                 )))),          (* in *)
+          Expr.Apply (Expr.Ident "factorial", Expr.Ident "5")));
+      
+      (* Should fail
+       * fun x -> (pair (x 3) (x true))
+       *)
+      Expr.Lambda("x",
+        Expr.Apply(
+          Expr.Apply(Expr.Ident "pair",
+                     Expr.Apply(Expr.Ident "x", Expr.Ident "3")),
+            Expr.Apply(Expr.Ident "x", Expr.Ident "true")));
+
+      (* (pair (f 3)) (f true) *)
+      Expr.Apply(
+        Expr.Apply(Expr.Ident "pair", Expr.Apply(Expr.Ident "f", Expr.Ident "4")),
+        Expr.Apply(Expr.Ident "f", Expr.Ident "true"));
+      
+      (* let f = (fn x -> x) in ((pair (f 4)) (f true)) *)
+      Expr.Let("f", Expr.Lambda("x", Expr.Ident "x"), pair);
+      
+      (* fun f -> f f *)
+      (* This should fail (recursive type definition) *)
+      Expr.Lambda("f", Expr.Apply(Expr.Ident "f", Expr.Ident "f"));
+      
+      (* let g = fun f -> 5 in g g *)
+      Expr.Let("g", Expr.Lambda("f", Expr.Ident "5"),
+        Expr.Apply(Expr.Ident "g", Expr.Ident "g"));
+
+      (* example that demonstrates generic and non-generic variables *)
+      (* fun g -> let f = fun x -> g in pair (f 3, f true) *)
+      Expr.Lambda("g",
+        Expr.Let("f",
+          Expr.Lambda("x", Expr.Ident "g"),
+          Expr.Apply(
+            Expr.Apply(
+              Expr.Ident "pair",
+              Expr.Apply(Expr.Ident "f", Expr.Ident "3")),
+            Expr.Apply(Expr.Ident "f", Expr.Ident "true"))));
+      
+      (* function composition *)
+      (* fun f -> fun g -> fun arg -> f g arg *)
+      Expr.Lambda("f", 
+        Expr.Lambda("g", 
+          Expr.Lambda("arg", 
+            Expr.Apply(
+              Expr.Ident "g", 
+              Expr.Apply(
+                Expr.Ident "f", 
+                Expr.Ident "arg")))))
+
+
     ]
   in
   List.iter (fun ex -> try_exp my_env ex) examples

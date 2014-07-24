@@ -1,3 +1,6 @@
+
+
+(* TODO: Remove Fragment, use only lambda *)
 module Expr = struct
   type t =
     | Ident    of string
@@ -15,7 +18,7 @@ module Expr = struct
       Printf.sprintf "%s[ %s ]" (to_string fn) (to_string arg)
 
     | Lambda (v, body) ->
-      Printf.sprintf "(fun %s -> %s)" v (to_string body)
+      Printf.sprintf "(\\ %s -> %s)" v (to_string body)
 
     | Let (v, defn, body) ->
       Printf.sprintf "(let %s = %s in %s)" v (to_string defn) (to_string body)
@@ -24,8 +27,8 @@ module Expr = struct
       Printf.sprintf "(let rec %s = %s in %s)" v (to_string defn) (to_string body)
 
     | Function (vl, body) ->
-      Printf.sprintf "(fn%s { %s })" 
-        (List.fold_left (fun a b -> a ^ " " ^ b ) "" vl)
+      Printf.sprintf "(fun %s -> %s )" 
+        (List.fold_left (fun a b -> (if a <> "" then a ^ " " else a) ^ b ) "" vl)
         (to_string body)
  
     | Fragment (v, body) -> (to_string body) 
@@ -50,6 +53,11 @@ let global_env =
     next_variable_name = 'a' 
   } 
 ;;
+
+let non_empty = function 
+  | [] -> false
+  | _  -> true
+
 
 module rec TypeVariable : sig
   type t = {
@@ -112,21 +120,42 @@ end = struct
       types = tl;
     }
 
-  let to_string t =
-    match t.types with
-    | [] -> t.name
+  let rec to_string t =
+    match t.name, t.types with
+    | _, [] -> t.name
 
-    | hd::tl::[] -> 
+    | _, hd::tl::[] -> 
       let hd_name = (TypeParameter.to_string hd) in
       let tl_name = (TypeParameter.to_string tl) in
       Printf.sprintf "(%s %s %s)" hd_name t.name tl_name
-
-    | _ -> 
+        
+    | "$>",_ -> 
+      let unwrap_top = function 
+          | TypeParameter.Tp_top top -> top
+          | TypeParameter.Tp_tvar _  -> assert false
+      in
+      TypeParameter.Tp_top t
+      |> Function.to_binop 
+      |> unwrap_top
+      |> to_string 
+      (* t.types *)
+      (* |> List.map TypeParameter.to_string  *)
+      (* |> List.rev  *)
+      (* |> (function  *)
+      (*     | hd::[] -> "() $> " ^ hd *)
+                      
+      (*     | hd::tl ->  *)
+      (*       let args_string =  *)
+      (*         List.fold_left (fun a b -> (if a <> "" then a ^ " -> " else "") ^ b) "" (List.rev tl) *)
+      (*       in *)
+      (*       Printf.sprintf "%s $> %s" args_string hd *)
+      (*     | [] -> assert false) *)
+        
+    | _, _ ->
       t.types
       |> List.map TypeParameter.to_string 
       |> List.fold_left (fun a b -> a ^ " " ^ b) ""
       |> Printf.sprintf "%s %s" t.name
-
 
   (* let compare top1 top2 = compare top1.types top2.types *)
   (* let hash tv =  *)
@@ -169,6 +198,7 @@ end
 and Function : sig
   val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
   val to_string: TypeOperator.t -> string
+  val to_binop: TypeParameter.t -> TypeParameter.t
 end = struct
   let create from_types to_type = 
     match from_types with 
@@ -176,11 +206,7 @@ end = struct
       TypeParameter.Tp_top 
       {
         TypeOperator.name  = "$>";
-        TypeOperator.types = [
-          (List.fold_left Fun.create x xs);
-          to_type
-        ]
-          
+        TypeOperator.types = from_types @ [to_type]
       }
     | _ -> assert false
 
@@ -192,6 +218,27 @@ end = struct
     in
     Printf.sprintf "(%s)" (string_builder f.TypeOperator.types)
 
+  let to_binop = function
+    | TypeParameter.Tp_tvar _  -> assert false
+    | TypeParameter.Tp_top({TypeOperator.name = n; TypeOperator.types = ts}) when n = "$>" ->
+      (* This is kinda gross, but we need to 
+       * suppress the exhaustive match warnings
+       *)
+      (match List.rev ts with
+       | to_type::rev_arg_types ->
+         (match List.rev rev_arg_types with
+          | (x::xs) ->
+            TypeParameter.Tp_top 
+              {
+                TypeOperator.name  = "$>";
+                TypeOperator.types = [
+                  (List.fold_left Fun.create x xs);
+                  to_type
+                ]
+              }
+          | _ -> assert false)
+       | _ -> assert false)
+    | TypeParameter.Tp_top _ as t -> t
 end
 
 
@@ -286,9 +333,9 @@ and analyse node env non_generic =
     unify (Fun.create arg_type result_type_param) fn_type;
     result_type_param
     
-  | Expr.Call (Expr.Function(vl,f) as fn, args) ->
-    if (List.length vl) <> (List.length args) 
-    then raise @@ UnificationError "Error: number of arguments does not match";
+  | Expr.Call (Expr.Function(vl,_) as fn, args) ->
+    (* if (List.length vl) <> (List.length args)  *)
+    (* then raise @@ UnificationError "Error: number of arguments does not match"; *)
     let fun_type = analyse fn env non_generic in
     let arg_types = List.map (fun a -> analyse_highest_fragment a env non_generic) args in
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
@@ -296,6 +343,16 @@ and analyse node env non_generic =
     (* print_endline (TypeParameter.to_string fun_type); *)
     (* print_endline (TypeParameter.to_string unifier); *)
     unify unifier fun_type;
+    result_type_param
+  
+  (* | Expr.Call(Expr.Let(_,_,_) as fn, args) *)
+  (* | Expr.Call(Expr.Letrec(_,_,_) as fn, args) *)
+  | Expr.Call(Expr.Call(_,_) as fn, args)
+  | Expr.Call(Expr.Ident(_) as fn, args) ->
+    let fun_type = analyse_highest_fragment fn env non_generic in
+    let arg_types = List.map (fun a -> analyse_highest_fragment a env non_generic) args in
+    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
+    unify (Function.create arg_types result_type_param) fun_type;
     result_type_param
 
   | Expr.Call(_,_) -> 
@@ -350,11 +407,16 @@ and unify t1 t2 : unit =
   | (TypeParameter.Tp_top(top), TypeParameter.Tp_tvar(tv)) ->
     unify b a
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
-    let top1_name = top1.TypeOperator.name in
-    let top2_name = top2.TypeOperator.name in
+    (* Allow the type system to unify lambdas and functions *)
+    (match (top1.TypeOperator.name, top2.TypeOperator.name) with 
+     | "->","$>" | "$>","->" -> ()
+     | a,b when a = b -> ()
+     | _,_ -> 
+       raise @@ TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2));
+    );
     let top1_types_size = (List.length top1.TypeOperator.types) in
     let top2_types_size = (List.length top2.TypeOperator.types) in
-    if ((top1_name <> top2_name) || (top1_types_size <> top2_types_size )) 
+    if (top1_types_size <> top2_types_size ) 
     then raise (TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2)));
     List.iter2 unify (top1.TypeOperator.types) (top2.TypeOperator.types)
   (* | _ -> raise (UnificationError "Not unified") *)
@@ -413,14 +475,14 @@ let () =
     |> StringMap.add "times" (Fun.create my_int (Fun.create my_int my_int))
   in
   let pair =
-    (Expr.Apply
-       ((Expr.Apply
-         ((Expr.Ident "pair"),
-          (Expr.Apply 
-             ((Expr.Ident "f"), (Expr.Ident "4"))))),
-        (Expr.Apply
-           ((Expr.Ident "f"),
-            (Expr.Ident "true")))))
+    (Expr.Call
+       ((Expr.Call (
+            Expr.Ident "pair",
+          [(Expr.Call 
+             ((Expr.Ident "f"), [(Expr.Ident "4")]))])),
+        [(Expr.Call
+           (Expr.Ident "f",
+            [Expr.Ident "true"]))]))
   in
   
   let examples =
@@ -428,8 +490,8 @@ let () =
       (* factorial *)
       (Expr.Letrec              (* letrec factorial = *)
          ("factorial",
-          Expr.Lambda           (* fun n -> *)
-            ("n",
+          Expr.Function(["n"],  (* fun n -> *)
+            Expr.Fragment("n",
              Expr.Apply (
                Expr.Apply (     (* cond (zero n) 1 *)
                  Expr.Apply     (* cond (zero n) *)
@@ -441,17 +503,19 @@ let () =
                  Expr.Apply (
                    Expr.Ident "factorial",
                    Expr.Apply (Expr.Ident "pred", Expr.Ident "n")
-                 )))),          (* in *)
+                 ))))),          (* in *)
           Expr.Apply (Expr.Ident "factorial", Expr.Ident "5")));
       
       (* Should fail
        * fun x -> (pair (x 3) (x true))
        *)
-      Expr.Lambda("x",
-        Expr.Apply(
-          Expr.Apply(Expr.Ident "pair",
-                     Expr.Apply(Expr.Ident "x", Expr.Ident "3")),
-            Expr.Apply(Expr.Ident "x", Expr.Ident "true")));
+      Expr.Function(["x"],
+        Expr.Fragment(
+          "x",
+          Expr.Apply(
+            Expr.Call(Expr.Ident "pair",
+                      [Expr.Call(Expr.Ident "x", [Expr.Ident "3"])]),
+            Expr.Call(Expr.Ident "x", [Expr.Ident "true"]))));
 
       (* (pair (f 3)) (f true) *)
       Expr.Apply(
@@ -459,65 +523,76 @@ let () =
         Expr.Apply(Expr.Ident "f", Expr.Ident "true"));
       
       (* let f = (fn x -> x) in ((pair (f 4)) (f true)) *)
-      Expr.Let("f", Expr.Lambda("x", Expr.Ident "x"), pair);
+      Expr.Let("f",
+        Expr.Function(["x"],
+          Expr.Fragment("x",
+            Expr.Ident "x")), pair);
       
       (* fun f -> f f *)
       (* This should fail (recursive type definition) *)
-      Expr.Lambda("f", Expr.Apply(Expr.Ident "f", Expr.Ident "f"));
+      Expr.Function(["f"],
+        Expr.Fragment("f",
+          Expr.Call(Expr.Ident "f", [Expr.Ident "f"])));
       
-      (* let g = fun f -> 5 in g g *)
-      Expr.Let("g", Expr.Lambda("f", Expr.Ident "5"),
-        Expr.Apply(Expr.Ident "g", Expr.Ident "g"));
+      (* should fail *)
+      (* let g = fun f -> 5 in g (g,true) *)
+      Expr.Let("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+        Expr.Call(Expr.Ident "g", [Expr.Ident "g"; Expr.Ident "true"]));
+
+      (* let g = fun f -> 5 in g (g) *)
+      Expr.Let("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+        Expr.Call(Expr.Ident "g", [Expr.Ident "g"]));
 
       (* example that demonstrates generic and non-generic variables *)
       (* fun g -> let f = fun x -> g in pair (f 3, f true) *)
-      Expr.Lambda("g",
-        Expr.Let("f",
-          Expr.Lambda("x", Expr.Ident "g"),
-          Expr.Apply(
+      Expr.Function(["g"],
+        Expr.Fragment("g",
+          Expr.Let("f",
+            Expr.Function(["x"], 
+              Expr.Fragment("x",
+                Expr.Ident "g")),
             Expr.Apply(
-              Expr.Ident "pair",
-              Expr.Apply(Expr.Ident "f", Expr.Ident "3")),
-            Expr.Apply(Expr.Ident "f", Expr.Ident "true"))));
+              Expr.Apply(
+                Expr.Ident "pair",
+                Expr.Apply(Expr.Ident "f", Expr.Ident "3")),
+              Expr.Apply(Expr.Ident "f", Expr.Ident "true")))));
       
       (* function composition *)
       (* fun f -> fun g -> fun arg -> f g arg *)
-      Expr.Lambda("f",
-        Expr.Lambda("g",
-          Expr.Lambda("arg",
+      Expr.Function(["f";"g";"arg"],
+        Expr.Fragment("g",
+          Expr.Fragment("arg",
             Expr.Apply(
               Expr.Ident "g",
               Expr.Apply(
                 Expr.Ident "f",
                 Expr.Ident "arg")))));
 
-      Expr.Function(
-        ["f"],
-        Expr.Fragment(
-          "f",
-          Expr.Lambda("g", Expr.Ident "g")));
+      Expr.Function(["f"],
+        Expr.Fragment("f",
+          Expr.Function(["g"],
+            Expr.Fragment("g", Expr.Ident "g"))));
       
       Expr.Apply(
-        Expr.Function(
-          ["f"],
-          Expr.Fragment(
-            "f",
-            Expr.Lambda("g", Expr.Ident "g"))),
+        Expr.Function(["f"],
+          Expr.Fragment("f",
+            Expr.Function(["g"],
+              Expr.Fragment("g", Expr.Ident "g")))),
         Expr.Ident "true");
 
       Expr.Function(
         ["f"; "g"],
-        Expr.Fragment(
-          "f",
-          Expr.Fragment(
-            "g",
+        Expr.Fragment("f", Expr.Fragment("g",
             Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
 
-        Expr.Lambda(
-          "f",
-          Expr.Lambda(
-            "g",
-            Expr.Apply(Expr.Ident "g", Expr.Ident "f")));
+      (* Should fail *)
+        Expr.Function(["f"],
+          Expr.Fragment("f",Expr.Fragment("g",
+            Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
+
+        Expr.Function(["f";"g"],
+          Expr.Fragment("f",Expr.Fragment("g",
+            Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
 
       Expr.Call(
         Expr.Function(
@@ -525,7 +600,7 @@ let () =
           Expr.Fragment("f",
             Expr.Fragment("z",
               Expr.Function(
-                ["g"], 
+                ["g"],
                 Expr.Fragment(
                   "g",
                   Expr.Ident "g"))))),

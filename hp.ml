@@ -27,8 +27,8 @@ module Expr = struct
       Printf.sprintf "(let rec %s = %s in %s)" v (to_string defn) (to_string body)
 
     | Function (vl, body) ->
-      Printf.sprintf "(fun %s -> %s )" 
-        (List.fold_left (fun a b -> (if a <> "" then a ^ " " else a) ^ b ) "" vl)
+      Printf.sprintf "fn(%s) { %s }" 
+        (List.fold_left (fun a b -> (if a <> "" then a ^ "," else a) ^ b ) "" vl)
         (to_string body)
  
     | Fragment (v, body) -> (to_string body) 
@@ -53,11 +53,6 @@ let global_env =
     next_variable_name = 'a' 
   } 
 ;;
-
-let non_empty = function 
-  | [] -> false
-  | _  -> true
-
 
 module rec TypeVariable : sig
   type t = {
@@ -129,7 +124,7 @@ end = struct
       let tl_name = (TypeParameter.to_string tl) in
       Printf.sprintf "(%s %s %s)" hd_name t.name tl_name
         
-    | "$>",_ -> 
+    | a,_ when a = Function.name -> 
       let unwrap_top = function 
           | TypeParameter.Tp_top top -> top
           | TypeParameter.Tp_tvar _  -> assert false
@@ -182,11 +177,13 @@ end
 and Fun : sig 
   val create: TypeParameter.t -> TypeParameter.t -> TypeParameter.t
   val to_string: TypeOperator.t -> string
+  val name: string
 end = struct
+  let name = "->"
   let create from_type to_type =
     TypeParameter.Tp_top
     {
-      TypeOperator.name  = "->";
+      TypeOperator.name  = name;
       TypeOperator.types = [from_type; to_type]
     }
   let to_string f = 
@@ -199,13 +196,15 @@ and Function : sig
   val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
   val to_string: TypeOperator.t -> string
   val to_binop: TypeParameter.t -> TypeParameter.t
+  val name: string
 end = struct
+  let name = "+>"
   let create from_types to_type = 
     match from_types with 
     | x::xs ->
       TypeParameter.Tp_top 
       {
-        TypeOperator.name  = "$>";
+        TypeOperator.name  = name;
         TypeOperator.types = from_types @ [to_type]
       }
     | _ -> assert false
@@ -213,14 +212,14 @@ end = struct
   let to_string f =
     let rec string_builder = function
       | [] -> assert false
-      | e::[] -> " $> " ^ (TypeParameter.to_string e)
+      | e::[] -> " " ^ name ^ " " ^ (TypeParameter.to_string e)
       | x::xs -> (TypeParameter.to_string x) ^ " -> " ^ (string_builder xs)
     in
     Printf.sprintf "(%s)" (string_builder f.TypeOperator.types)
 
   let to_binop = function
     | TypeParameter.Tp_tvar _  -> assert false
-    | TypeParameter.Tp_top({TypeOperator.name = n; TypeOperator.types = ts}) when n = "$>" ->
+    | TypeParameter.Tp_top({TypeOperator.name = n; TypeOperator.types = ts}) when n = name ->
       (* This is kinda gross, but we need to 
        * suppress the exhaustive match warnings
        *)
@@ -230,7 +229,7 @@ end = struct
           | (x::xs) ->
             TypeParameter.Tp_top 
               {
-                TypeOperator.name  = "$>";
+                TypeOperator.name  = name;
                 TypeOperator.types = [
                   (List.fold_left Fun.create x xs);
                   to_type
@@ -409,7 +408,8 @@ and unify t1 t2 : unit =
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
     (* Allow the type system to unify lambdas and functions *)
     (match (top1.TypeOperator.name, top2.TypeOperator.name) with 
-     | "->","$>" | "$>","->" -> ()
+     | a, b when (a = Fun.name && b = Function.name) || 
+                 (a = Function.name && b = Fun.name) -> ()
      | a,b when a = b -> ()
      | _,_ -> 
        raise @@ TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2));
@@ -580,6 +580,13 @@ let () =
               Expr.Fragment("g", Expr.Ident "g")))),
         Expr.Ident "true");
 
+      Expr.Call(
+        Expr.Function(["f"],
+          Expr.Fragment("f",
+            Expr.Function(["g"],
+              Expr.Fragment("g", Expr.Ident "g")))),
+        [Expr.Ident "true"]);
+
       Expr.Function(
         ["f"; "g"],
         Expr.Fragment("f", Expr.Fragment("g",
@@ -593,6 +600,10 @@ let () =
         Expr.Function(["f";"g"],
           Expr.Fragment("f",Expr.Fragment("g",
             Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
+
+        Expr.Function(["f";"g"],
+          Expr.Fragment("f",Expr.Fragment("g",
+            Expr.Call(Expr.Ident "g", [Expr.Ident "f"]))));
 
       Expr.Call(
         Expr.Function(

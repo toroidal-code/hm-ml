@@ -62,7 +62,7 @@ module rec TypeVariable : sig
   }    
   val create: unit -> t
   val name: t -> string
-  val to_string: t -> string
+  val to_string: ?depth:int -> t -> string
   val compare: t -> t -> int
   val hash: t -> int
   val equal: t -> t -> bool
@@ -89,10 +89,10 @@ end = struct
     end;
     tv.name
   
-  let to_string tv = 
+  let to_string ?depth:(lvl=0) tv = 
     match tv.instance with
     | None -> name tv
-    | Some i -> TypeParameter.to_string i
+    | Some i -> TypeParameter.to_string ?depth:(Some lvl) i
 
   let compare t1 t2 = t2.id - t1.id
   let hash tv = tv.id
@@ -102,7 +102,7 @@ end
 and TypeOperator : sig 
   type t = { name : string; types : TypeParameter.t list }
   val create: string -> TypeParameter.t list -> t
-  val to_string: t -> string
+  val to_string: ?depth:int -> t -> string
 end = struct
   type t =
     {
@@ -115,43 +115,72 @@ end = struct
       types = tl;
     }
 
-  let rec to_string t =
-    match t.name, t.types with
-    | _, [] -> t.name
-
-    | _, hd::tl::[] -> 
-      let hd_name = (TypeParameter.to_string hd) in
-      let tl_name = (TypeParameter.to_string tl) in
-      Printf.sprintf "(%s %s %s)" hd_name t.name tl_name
-        
-    | a,_ when a = Function.name -> 
-      let unwrap_top = function 
+  let rec to_string ?depth:(lvl=0) t =
+    let string_repr = 
+      match t.name, t.types with
+      | _, [] -> t.name
+                   
+      | a, _::_::_::_ when a = Function.name -> 
+        let unwrap_top = function 
           | TypeParameter.Tp_top top -> top
           | TypeParameter.Tp_tvar _  -> assert false
-      in
-      TypeParameter.Tp_top t
-      |> Function.to_binop 
-      |> unwrap_top
-      |> to_string 
-      (* t.types *)
-      (* |> List.map TypeParameter.to_string  *)
-      (* |> List.rev  *)
-      (* |> (function  *)
-      (*     | hd::[] -> "() $> " ^ hd *)
-                      
-      (*     | hd::tl ->  *)
-      (*       let args_string =  *)
-      (*         List.fold_left (fun a b -> (if a <> "" then a ^ " -> " else "") ^ b) "" (List.rev tl) *)
-      (*       in *)
-      (*       Printf.sprintf "%s $> %s" args_string hd *)
-      (*     | [] -> assert false) *)
-        
-    | _, _ ->
-      t.types
-      |> List.map TypeParameter.to_string 
-      |> List.fold_left (fun a b -> a ^ " " ^ b) ""
-      |> Printf.sprintf "%s %s" t.name
-
+        in
+        let left_assoc t = Scanf.format_from_string (
+            match t with
+            | TypeParameter.Tp_top _ -> "%s %s (%s)"
+            | TypeParameter.Tp_tvar _ -> "%s %s %s"
+          ) "%s %s %s"
+        in
+        (* TypeParameter.Tp_top t *)
+        (* |> Function.to_binop  *)
+        (* |> unwrap_top *)
+        (* |> to_string  *)
+        t.types
+        |> List.rev
+        |> (function
+            (* hd is the last element, the return type (reversed, remember?) *)
+            | hd::[] -> "() " ^ Function.name ^ " " ^ (TypeParameter.to_string hd)
+                                                      
+            | hd::tl ->
+              (* let rec left_assoc  = function *)
+              (*   | TypeParameter.Tp_top(term ->  *)
+              (*     if lvl = 0 then  *)
+              (*       Printf.sprintf "%s %s (%s)" (TypeOperator.to_string x) Function.name (left_assoc ?depth:(Some (succ lvl)) xs) *)
+              (*     else *)
+              (*       Printf.sprintf "%s %s %s" (TypeOperator.to_string x) Function.name (to_string xs) *)
+              (*   | TypeParameter.Tp_tvar x -> (TypeVariable.to_string x) *)
+              (* in *)
+              (* let (h2::t2) = tl in  *)
+              let args_string =  List.fold_left (fun a b -> 
+                  if a <> "" then 
+                    Printf.sprintf (left_assoc b) a "->" (TypeParameter.to_string ?depth:(Some (succ lvl)) b) 
+                  else 
+                    TypeParameter.to_string ?depth:(Some (succ lvl)) b) "" tl 
+              in
+              let format = left_assoc hd in
+              Printf.sprintf format args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) hd)
+            | [] -> assert false)
+          
+  
+      | _, hd::tl::[] -> 
+        let hd_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) hd) in
+        let tl_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) tl) in
+        Printf.sprintf "%s %s %s" hd_name t.name tl_name
+          
+      | _, _ ->
+        t.types
+        |> List.map TypeParameter.to_string 
+        |> List.fold_left (fun a b -> a ^ " " ^ b) ""
+        |> Printf.sprintf "%s %s" t.name
+    in
+    if (lvl <> 0) && 
+       ((String.length string_repr) > 1) && 
+       (not (string_repr.[0] = '(')) && 
+       (not (List.mem string_repr ["int";"bool";"unit"])) then
+      "(" ^ string_repr ^ ")"
+    else
+      string_repr
+                     
   (* let compare top1 top2 = compare top1.types top2.types *)
   (* let hash tv =  *)
   (*   let rec hash' p = function *)
@@ -163,20 +192,19 @@ end = struct
 end
 and TypeParameter : sig
   type t = Tp_tvar of TypeVariable.t | Tp_top  of TypeOperator.t
-  val to_string: t -> string
+  val to_string: ?depth:int -> t -> string
 end = struct
   type t =
     | Tp_tvar of TypeVariable.t
     | Tp_top  of TypeOperator.t
                    
-  let to_string = function 
-    | Tp_tvar tv -> TypeVariable.to_string tv
-    | Tp_top top -> TypeOperator.to_string top
+  let to_string ?depth:(lvl=0) = function 
+    | Tp_tvar tv -> TypeVariable.to_string ?depth:(Some lvl) tv
+    | Tp_top top -> TypeOperator.to_string ?depth:(Some lvl) top
 end
 
 and Fun : sig 
   val create: TypeParameter.t -> TypeParameter.t -> TypeParameter.t
-  val to_string: TypeOperator.t -> string
   val name: string
 end = struct
   let name = "->"
@@ -186,15 +214,10 @@ end = struct
       TypeOperator.name  = name;
       TypeOperator.types = [from_type; to_type]
     }
-  let to_string f = 
-    Printf.sprintf "(%s -> %s)" 
-      (TypeParameter.to_string @@ List.nth f.TypeOperator.types 0) 
-      (TypeParameter.to_string @@ List.nth f.TypeOperator.types 1)
 
 end
 and Function : sig
   val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
-  val to_string: TypeOperator.t -> string
   val to_binop: TypeParameter.t -> TypeParameter.t
   val name: string
 end = struct
@@ -209,13 +232,13 @@ end = struct
       }
     | _ -> assert false
 
-  let to_string f =
-    let rec string_builder = function
-      | [] -> assert false
-      | e::[] -> " " ^ name ^ " " ^ (TypeParameter.to_string e)
-      | x::xs -> (TypeParameter.to_string x) ^ " -> " ^ (string_builder xs)
-    in
-    Printf.sprintf "(%s)" (string_builder f.TypeOperator.types)
+  (* let to_string f = *)
+  (*   let rec string_builder = function *)
+  (*     | [] -> assert false *)
+  (*     | e::[] -> " " ^ name ^ " " ^ (TypeParameter.to_string e) *)
+  (*     | x::xs -> (TypeParameter.to_string x) ^ " -> " ^ (string_builder xs) *)
+  (*   in *)
+  (*   Printf.sprintf "%s" (string_builder f.TypeOperator.types) *)
 
   let to_binop = function
     | TypeParameter.Tp_tvar _  -> assert false

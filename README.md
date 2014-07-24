@@ -2,11 +2,11 @@
 
 This repo contains an implementation of Algorithm W, a linear-time inference engine for the Damas-Hindley-Milner type system.
 
-The `hm.ml` fine contains a classic implementation, with added recursive let-bindings.
+The `hm.ml` file contains a classic implementation, with added recursive let-bindings.
 
 ## HMc
 
-`hp.el`, tentatively called HMc or Hindley-Milner with calling semantics, is a variant I am developing for my work with [Brick](https://github.com/brick-lang/brick-lang).
+`hp.ml`, tentatively called HMc or Hindley-Milner with calling semantics, is a variant I am developing for my work with [Brick](https://github.com/brick-lang/brick-lang).
 
 It distinguishes between lambda terms (usually called anonymous functions) and functions in the sense of commonly used programming languages today. In this explanation I refer to passing all arguments to a function as a "call", perhaps better described as a full application. Passing only n values to an m-ary function where n is strictly less than m is referred to as a "curry".
 
@@ -25,5 +25,5 @@ Underneath, this can be represented as
     Function(["f","g"],
         Fragment("f",
             Fragment("g",
-                Apply(Ident("g"),
+                Call(Ident("g"),
                       Ident("f")))))

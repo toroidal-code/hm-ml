@@ -121,20 +121,6 @@ end = struct
       | _, [] -> t.name
                    
       | a, _::_::_::_ when a = Function.name -> 
-        let unwrap_top = function 
-          | TypeParameter.Tp_top top -> top
-          | TypeParameter.Tp_tvar _  -> assert false
-        in
-        let left_assoc t = Scanf.format_from_string (
-            match t with
-            | TypeParameter.Tp_top _ -> "%s %s (%s)"
-            | TypeParameter.Tp_tvar _ -> "%s %s %s"
-          ) "%s %s %s"
-        in
-        (* TypeParameter.Tp_top t *)
-        (* |> Function.to_binop  *)
-        (* |> unwrap_top *)
-        (* |> to_string  *)
         t.types
         |> List.rev
         |> (function
@@ -142,23 +128,13 @@ end = struct
             | hd::[] -> "() " ^ Function.name ^ " " ^ (TypeParameter.to_string hd)
                                                       
             | hd::tl ->
-              (* let rec left_assoc  = function *)
-              (*   | TypeParameter.Tp_top(term ->  *)
-              (*     if lvl = 0 then  *)
-              (*       Printf.sprintf "%s %s (%s)" (TypeOperator.to_string x) Function.name (left_assoc ?depth:(Some (succ lvl)) xs) *)
-              (*     else *)
-              (*       Printf.sprintf "%s %s %s" (TypeOperator.to_string x) Function.name (to_string xs) *)
-              (*   | TypeParameter.Tp_tvar x -> (TypeVariable.to_string x) *)
-              (* in *)
-              (* let (h2::t2) = tl in  *)
               let args_string =  List.fold_left (fun a b -> 
                   if a <> "" then 
-                    Printf.sprintf (left_assoc b) a "->" (TypeParameter.to_string ?depth:(Some (succ lvl)) b) 
+                    Printf.sprintf "%s %s %s" a Fun.name (TypeParameter.to_string ?depth:(Some (succ lvl)) b) 
                   else 
                     TypeParameter.to_string ?depth:(Some (succ lvl)) b) "" tl 
               in
-              let format = left_assoc hd in
-              Printf.sprintf format args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) hd)
+              Printf.sprintf "%s %s %s" args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) hd)
             | [] -> assert false)
           
   
@@ -180,15 +156,6 @@ end = struct
       "(" ^ string_repr ^ ")"
     else
       string_repr
-                     
-  (* let compare top1 top2 = compare top1.types top2.types *)
-  (* let hash tv =  *)
-  (*   let rec hash' p = function *)
-  (*     | t::tl -> *)
-  (*       (pow 31 p) + (TypeVariable.hash t) + (hash' (p + 1) tl) *)
-  (*     | [] -> 0 *)
-  (*   in *)
-  (*   hash' 0 tv.types *)
 end
 and TypeParameter : sig
   type t = Tp_tvar of TypeVariable.t | Tp_top  of TypeOperator.t
@@ -366,9 +333,7 @@ and analyse node env non_generic =
     (* print_endline (TypeParameter.to_string unifier); *)
     unify unifier fun_type;
     result_type_param
-  
-  (* | Expr.Call(Expr.Let(_,_,_) as fn, args) *)
-  (* | Expr.Call(Expr.Letrec(_,_,_) as fn, args) *)
+
   | Expr.Call(Expr.Call(_,_) as fn, args)
   | Expr.Call(Expr.Ident(_) as fn, args) ->
     let fun_type = analyse_highest_fragment fn env non_generic in

@@ -5,28 +5,24 @@ module Expr = struct
     | Call     of t * t list
     | Function of string list * t
     | Fragment of string * t
-    | Let      of string * t * t
     | Letrec   of string * t * t
 
   let rec to_string = function 
     | Ident s -> s
     | Apply (fn, arg) -> 
-      Printf.sprintf "%s[ %s ]" (to_string fn) (to_string arg)
-
-    | Let (v, defn, body) ->
-      Printf.sprintf "(let %s = %s in %s)" v (to_string defn) (to_string body)
+      Printf.sprintf "%s[%s]" (to_string fn) (to_string arg)
 
     | Letrec (v, defn, body) ->
-      Printf.sprintf "(let rec %s = %s in %s)" v (to_string defn) (to_string body)
+      Printf.sprintf "let %s = %s in %s" v (to_string defn) (to_string body)
 
     | Function (vl, body) ->
       Printf.sprintf "fn(%s) { %s }" 
-        (List.fold_left (fun a b -> (if a <> "" then a ^ "," else a) ^ b ) "" vl)
+        (List.fold_left (fun a b -> (if a <> "" then a ^ ", " else a) ^ b ) "" vl)
         (to_string body)
  
     | Fragment (v, body) -> (to_string body) 
     | Call (fn, args) ->
-      Printf.sprintf "%s( %s )" (to_string fn) 
+      Printf.sprintf "%s(%s)" (to_string fn) 
         (match args with
          | [] -> ""
          | hd::tl -> (List.fold_left (fun a e -> a ^ ", " ^ (to_string e)) (to_string hd) tl))
@@ -141,9 +137,9 @@ end = struct
         |> List.fold_left (fun a b -> a ^ " " ^ b) ""
         |> Printf.sprintf "%s %s" t.name
     in
-    if (lvl <> 0) && 
-       ((String.length string_repr) > 1) && 
-       (not (string_repr.[0] = '(')) && 
+    if (lvl <> 0) &&
+       ((String.length string_repr) > 1) &&
+       (not (string_repr.[0] = '(')) &&
        (not (List.mem string_repr ["int";"bool";"unit"])) then
       "(" ^ string_repr ^ ")"
     else
@@ -186,19 +182,10 @@ end = struct
       TypeParameter.Tp_top 
       {
         TypeOperator.name  = name;
-        TypeOperator.types = (* (List.rev *) from_types(* ) *) @ [to_type]
+        TypeOperator.types = from_types @ [to_type]
       }
     | _ -> assert false
 end
-
-
-let rec pow a = function
-  | 0 -> 1
-  | 1 -> a
-  | n -> 
-    let b = pow a (n / 2) in
-    b * b * (if n mod 2 = 0 then 1 else a)
-
 
 (* Basic types are constructed with a nullary type constructor *)
 let my_int  = TypeParameter.Tp_top (TypeOperator.create "int" [])
@@ -222,12 +209,15 @@ and analyse_highest_fragment node env non_generic =
   | Expr.Function(_,b) -> analyse_highest_fragment b env non_generic
   | e -> analyse e env non_generic 
 
+(* and analyse_call analyzer env non_generic = *)
+
+
+
 and analyse node env non_generic = 
   match node with
   | Expr.Ident name -> get_type name env non_generic
 
   | Expr.Apply (fn, arg) -> 
-    (* let fun_type = analyse fn env non_generic in *)
     let fun_type = analyse_highest_fragment fn env non_generic in
     let arg_type = analyse_highest_fragment arg env non_generic in
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
@@ -241,11 +231,7 @@ and analyse node env non_generic =
     let new_non_generic = TVSet.add arg_type non_generic in
     let result_type = analyse body new_env new_non_generic in
     Fun.create arg_type_param result_type
-                                     
-  | Expr.Let (v, defn, body) ->
-    let defn_type = analyse defn env non_generic in
-    let new_env   = StringMap.add v defn_type env in
-    analyse body new_env non_generic
+
   
   | Expr.Letrec (v, defn, body) ->
     let new_type = TypeVariable.create () in
@@ -261,13 +247,11 @@ and analyse node env non_generic =
     let arg_type_params = List.map (fun t -> TypeParameter.Tp_tvar t) arg_types in
     let new_env = List.fold_right2 StringMap.add vl arg_type_params env in
     let new_non_generic = List.fold_right TVSet.add arg_types non_generic in
-    (* let result_type = analyse body new_env new_non_generic in *)
     let result_type = analyse_lowest_fragment body new_env new_non_generic in
-    (* (List.iter (fun x -> x |> TypeParameter.to_string |> print_endline ) arg_type_params); *)
     Function.create arg_type_params result_type
 
   (* A function passed no arguments passes the empty tuple to
-   * its' first fragment (unit type).
+   * its first fragment (unit type).
    *)
   | Expr.Call (Expr.Function(vl,f), []) ->
     let fn_type = analyse f env non_generic in
@@ -275,28 +259,18 @@ and analyse node env non_generic =
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
     unify (Fun.create arg_type result_type_param) fn_type;
     result_type_param
-    
-  | Expr.Call (Expr.Function(vl,_) as fn, args) ->
-    (* if (List.length vl) <> (List.length args)  *)
-    (* then raise @@ UnificationError "Error: number of arguments does not match"; *)
+
+  | Expr.Call(Expr.Function(_,_) as fn, args) (* -> *)
+  | Expr.Call(Expr.Call(_,_) as fn, args)
+  | Expr.Call(Expr.Ident(_) as fn, args) ->
     let fun_type = analyse fn env non_generic in
     let arg_types = List.map (fun a -> analyse_highest_fragment a env non_generic) args in
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
     let unifier = (Function.create arg_types result_type_param) in
-    (* print_endline (TypeParameter.to_string fun_type); *)
-    (* print_endline (TypeParameter.to_string unifier); *)
     unify unifier fun_type;
     result_type_param
-
-  | Expr.Call(Expr.Call(_,_) as fn, args)
-  | Expr.Call(Expr.Ident(_) as fn, args) ->
-    let fun_type = analyse_highest_fragment fn env non_generic in
-    let arg_types = List.map (fun a -> analyse_highest_fragment a env non_generic) args in
-    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
-    unify (Function.create arg_types result_type_param) fun_type;
-    result_type_param
-
-  | Expr.Call(_,_) -> 
+    
+  | Expr.Call(_,_) ->
     raise @@ UnificationError "Cannot call anything other than a function"
     
 
@@ -324,8 +298,7 @@ and fresh t non_generic : TypeParameter.t =
       end
       else p
     | TypeParameter.Tp_top(top) ->
-      TypeParameter.Tp_top (TypeOperator.create top.TypeOperator.name 
-                              (List.map (fun x -> freshrec x) top.TypeOperator.types))
+      TypeParameter.Tp_top (TypeOperator.create top.TypeOperator.name @@ List.map freshrec top.TypeOperator.types)
   in
   freshrec t
 
@@ -342,26 +315,24 @@ and unify t1 t2 : unit =
   | (TypeParameter.Tp_tvar(tv), _) ->
     if a <> b then begin
       if occurs_in_type tv b then
-        raise (TypeError "recursive unification");
+        raise @@ TypeError("recursive unification"); (* for type "" ^ (TypeVariable.to_string tv)); *)
       tv.TypeVariable.instance <- Some b
     end
   | (TypeParameter.Tp_top(top), TypeParameter.Tp_tvar(tv)) ->
     unify b a
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
     (* Allow the type system to unify lambdas and functions *)
-    (match (top1.TypeOperator.name, top2.TypeOperator.name) with 
-     | a, b when (a = Fun.name && b = Function.name) || 
-                 (a = Function.name && b = Fun.name) -> ()
-     | a,b when a = b -> ()
-     | _,_ -> 
-       raise @@ TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2));
-    );
+    let top1_name = top1.TypeOperator.name in
+    let top2_name = top2.TypeOperator.name in
     let top1_types_size = (List.length top1.TypeOperator.types) in
     let top2_types_size = (List.length top2.TypeOperator.types) in
-    if (top1_types_size <> top2_types_size ) 
-    then raise (TypeError ("Type mismatch " ^ (TypeOperator.to_string top1) ^ " != " ^ (TypeOperator.to_string top2)));
+    if (top1_types_size <> top2_types_size) ||
+       (top1_name <> top2_name) && 
+       (top1_name <> Fun.name || top2_name <> Function.name) && 
+       (top1_name <> Function.name || top2_name <> Fun.name) then
+       raise @@ TypeError ("Type mismatch: " ^ (TypeOperator.to_string top1) ^ " cannot be unified with " ^ (TypeOperator.to_string top2) )
+    ;      
     List.iter2 unify (top1.TypeOperator.types) (top2.TypeOperator.types)
-  (* | _ -> raise (UnificationError "Not unified") *)
       
 and prune (t:TypeParameter.t) = 
   match t with
@@ -392,12 +363,14 @@ and is_integer_literal name =
 
 
 let try_exp env node =
-  Printf.printf "%s :  " (Expr.to_string node);
-  try
-    print_endline @@ TypeParameter.to_string @@ analyse node env TVSet.empty
-  with
-    ParseError e | TypeError e ->
-    print_endline e
+  (try
+     Printf.printf "%s \n" (Expr.to_string node);
+     Printf.printf "- : %s\n" (TypeParameter.to_string @@ analyse node env TVSet.empty)
+   with 
+     ParseError e 
+   | TypeError e -> 
+     Printf.printf "Error: %s\n" e);
+  print_newline ()
 
 
 let () =
@@ -465,7 +438,7 @@ let () =
         Expr.Apply(Expr.Ident "f", Expr.Ident "true"));
       
       (* let f = (fn x -> x) in ((pair (f 4)) (f true)) *)
-      Expr.Let("f",
+      Expr.Letrec("f",
         Expr.Function(["x"],
           Expr.Fragment("x",
             Expr.Ident "x")), pair);
@@ -478,18 +451,18 @@ let () =
       
       (* should fail *)
       (* let g = fun f -> 5 in g (g,true) *)
-      Expr.Let("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+      Expr.Letrec("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
         Expr.Call(Expr.Ident "g", [Expr.Ident "g"; Expr.Ident "true"]));
 
       (* let g = fun f -> 5 in g (g) *)
-      Expr.Let("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+      Expr.Letrec("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
         Expr.Call(Expr.Ident "g", [Expr.Ident "g"]));
 
       (* example that demonstrates generic and non-generic variables *)
       (* fun g -> let f = fun x -> g in pair (f 3, f true) *)
       Expr.Function(["g"],
         Expr.Fragment("g",
-          Expr.Let("f",
+          Expr.Letrec("f",
             Expr.Function(["x"], 
               Expr.Fragment("x",
                 Expr.Ident "g")),

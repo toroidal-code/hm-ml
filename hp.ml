@@ -36,12 +36,6 @@ type env =
   }
 ;;
 
-let global_env = 
-  { 
-    next_variable_id = 0;
-    next_variable_name = 'a' 
-  } 
-;;
 
 module rec TypeVariable : sig
   type t = {
@@ -49,9 +43,9 @@ module rec TypeVariable : sig
     mutable name: string;
     mutable instance: TypeParameter.t option;
   }    
-  val create: unit -> t
-  val name: t -> string
-  val to_string: ?depth:int -> t -> string
+  val create: env:env -> t
+  val name: env:env -> t -> string
+  val to_string: ?depth:int -> env:env -> t -> string
   val compare: t -> t -> int
   val hash: t -> int
   val equal: t -> t -> bool
@@ -63,25 +57,25 @@ end = struct
       mutable instance: TypeParameter.t option;
     }
 
-  let create () = 
-    global_env.next_variable_id <- global_env.next_variable_id + 1;
+  let create ~env:env = 
+    env.next_variable_id <- env.next_variable_id + 1;
     { 
-      id = global_env.next_variable_id - 1;
+      id = env.next_variable_id - 1;
       name = "";
       instance = None;
     }
     
-  let name tv = 
+  let name ~env:env tv = 
     if tv.name = "" then begin
-      tv.name <- Char.escaped global_env.next_variable_name;
-      global_env.next_variable_name <- Char.chr ((Char.code global_env.next_variable_name) + 1)
+      tv.name <- Char.escaped env.next_variable_name;
+      env.next_variable_name <- Char.chr ((Char.code env.next_variable_name) + 1)
     end;
     tv.name
   
-  let to_string ?depth:(lvl=0) tv = 
+  let to_string ?depth:(lvl=0) ~env:env tv = 
     match tv.instance with
-    | None -> name tv
-    | Some i -> TypeParameter.to_string ?depth:(Some lvl) i
+    | None -> name ~env:env tv
+    | Some i -> TypeParameter.to_string ?depth:(Some lvl) ~env:env i
 
   let compare t1 t2 = t2.id - t1.id
   let hash tv = tv.id
@@ -91,7 +85,7 @@ end
 and TypeOperator : sig 
   type t = { name : string; types : TypeParameter.t list }
   val create: string -> TypeParameter.t list -> t
-  val to_string: ?depth:int -> t -> string
+  val to_string: ?depth:int -> env:env -> t -> string
 end = struct
   type t =
     {
@@ -104,7 +98,7 @@ end = struct
       types = tl;
     }
 
-  let rec to_string ?depth:(lvl=0) t =
+  let rec to_string ?depth:(lvl=0) ~env:env t =
     let string_repr = 
       match t.name, t.types with
       | _, [] -> t.name
@@ -113,27 +107,27 @@ end = struct
         t.types |> List.rev
         |> (function
             (* hd is the last element, the return type (reversed, remember?) *)
-            | hd::[] -> "() " ^ Function.name ^ " " ^ (TypeParameter.to_string hd)
+            | hd::[] -> "() " ^ Function.name ^ " " ^ (TypeParameter.to_string ~env:env hd)
                                                       
             | hd::tl ->
               let args_string = tl |> List.rev |> List.fold_left (fun a b -> 
                   if a <> "" then 
-                    Printf.sprintf "%s %s %s" a Fun.name (TypeParameter.to_string ?depth:(Some (succ lvl)) b) 
+                    Printf.sprintf "%s %s %s" a Fun.name (TypeParameter.to_string ?depth:(Some (succ lvl)) ~env:env b) 
                   else 
-                    TypeParameter.to_string ?depth:(Some (succ lvl)) b) ""
+                    TypeParameter.to_string ?depth:(Some (succ lvl)) ~env:env b) ""
               in
-              Printf.sprintf "%s %s %s" args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) hd)
+              Printf.sprintf "%s %s %s" args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) ~env:env hd)
             | [] -> assert false)
           
   
       | _, hd::tl::[] -> 
-        let hd_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) hd) in
-        let tl_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) tl) in
+        let hd_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) ~env:env hd) in
+        let tl_name = (TypeParameter.to_string ?depth:(Some (succ lvl)) ~env:env tl) in
         Printf.sprintf "%s %s %s" hd_name t.name tl_name
           
       | _, _ ->
         t.types
-        |> List.map TypeParameter.to_string 
+        |> List.map (TypeParameter.to_string ~env:env)
         |> List.fold_left (fun a b -> a ^ " " ^ b) ""
         |> Printf.sprintf "%s %s" t.name
     in
@@ -147,15 +141,15 @@ end = struct
 end
 and TypeParameter : sig
   type t = Tp_tvar of TypeVariable.t | Tp_top  of TypeOperator.t
-  val to_string: ?depth:int -> t -> string
+  val to_string: ?depth:int -> env:env -> t -> string
 end = struct
   type t =
     | Tp_tvar of TypeVariable.t
     | Tp_top  of TypeOperator.t
                    
-  let to_string ?depth:(lvl=0) = function 
-    | Tp_tvar tv -> TypeVariable.to_string ?depth:(Some lvl) tv
-    | Tp_top top -> TypeOperator.to_string ?depth:(Some lvl) top
+  let to_string ?depth:(lvl=0) ~env:env = function 
+    | Tp_tvar tv -> TypeVariable.to_string ?depth:(Some lvl) ~env:env tv
+    | Tp_top top -> TypeOperator.to_string ?depth:(Some lvl) ~env:env top
 end
 
 and Fun : sig 
@@ -199,90 +193,90 @@ exception ParseError of string
 exception TypeError of string
 exception UnificationError of string
 
-let rec analyse_lowest_fragment node env non_generic =
+let rec analyse_lowest_fragment ~env:env node bindings non_generic =
   match node with
-  | Expr.Fragment (_,b) -> analyse_lowest_fragment b env non_generic
-  | e -> analyse e env non_generic 
+  | Expr.Fragment (_,b) -> analyse_lowest_fragment b bindings non_generic ~env:env 
+  | e -> analyse e bindings non_generic ~env:env 
 
-and analyse_highest_fragment node env non_generic =
+and analyse_highest_fragment node ~env:env bindings non_generic =
   match node with
-  | Expr.Function(_,b) -> analyse_highest_fragment b env non_generic
-  | e -> analyse e env non_generic 
+  | Expr.Function(_,b) -> analyse_highest_fragment b bindings non_generic ~env:env 
+  | e -> analyse e bindings non_generic ~env:env 
 
 (* and analyse_call analyzer env non_generic = *)
 
 
 
-and analyse node env non_generic = 
+and analyse node ~env:env bindings non_generic : TypeParameter.t = 
   match node with
-  | Expr.Ident name -> get_type name env non_generic
+  | Expr.Ident name -> get_type name bindings non_generic ~env:env
 
   | Expr.Apply (fn, arg) -> 
-    let fun_type = analyse_highest_fragment fn env non_generic in
-    let arg_type = analyse_highest_fragment arg env non_generic in
-    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
-    unify (Fun.create arg_type result_type_param) fun_type;
+    let fun_type = analyse_highest_fragment fn bindings non_generic ~env:env in
+    let arg_type = analyse_highest_fragment arg bindings non_generic ~env:env in
+    let result_type_param = TypeParameter.Tp_tvar(TypeVariable.create ~env:env) in
+    unify (Fun.create arg_type result_type_param) fun_type ~env:env;
     result_type_param
     
   | Expr.Fragment(v, body) -> 
-    let arg_type = TypeVariable.create () in
+    let arg_type = TypeVariable.create ~env:env  in
     let arg_type_param = TypeParameter.Tp_tvar arg_type in
-    let new_env  = StringMap.add v arg_type_param env in
+    let new_env  = StringMap.add v arg_type_param bindings in
     let new_non_generic = TVSet.add arg_type non_generic in
-    let result_type = analyse body new_env new_non_generic in
+    let result_type = analyse body new_env new_non_generic ~env:env in
     Fun.create arg_type_param result_type
 
   
   | Expr.Letrec (v, defn, body) ->
-    let new_type = TypeVariable.create () in
+    let new_type = TypeVariable.create ~env:env in
     let new_type_param = TypeParameter.Tp_tvar new_type in
-    let new_env  = StringMap.add v new_type_param env in
+    let new_env  = StringMap.add v new_type_param bindings in
     let new_non_generic = TVSet.add new_type non_generic in
-    let defn_type = analyse defn new_env new_non_generic in
-    unify new_type_param defn_type;
-    analyse body new_env non_generic
+    let defn_type = analyse defn new_env new_non_generic ~env:env in
+    unify new_type_param defn_type ~env:env;
+    analyse body new_env non_generic ~env:env
 
   | Expr.Function (vl, body) ->
-    let arg_types = List.map (fun _ -> TypeVariable.create ()) vl in
+    let arg_types = List.map (fun _ -> TypeVariable.create ~env:env) vl in
     let arg_type_params = List.map (fun t -> TypeParameter.Tp_tvar t) arg_types in
-    let new_env = List.fold_right2 StringMap.add vl arg_type_params env in
+    let new_env = List.fold_right2 StringMap.add vl arg_type_params bindings in
     let new_non_generic = List.fold_right TVSet.add arg_types non_generic in
-    let result_type = analyse_lowest_fragment body new_env new_non_generic in
+    let result_type = analyse_lowest_fragment body new_env new_non_generic ~env:env in
     Function.create arg_type_params result_type
 
   (* A function passed no arguments passes the empty tuple to
    * its first fragment (unit type).
    *)
   | Expr.Call (Expr.Function(vl,f), []) ->
-    let fn_type = analyse f env non_generic in
+    let fn_type = analyse f bindings non_generic ~env:env in
     let arg_type = my_unit in
-    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
-    unify (Fun.create arg_type result_type_param) fn_type;
+    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
+    unify (Fun.create arg_type result_type_param) fn_type ~env:env;
     result_type_param
 
   | Expr.Call(Expr.Function(_,_) as fn, args) (* -> *)
   | Expr.Call(Expr.Call(_,_) as fn, args)
   | Expr.Call(Expr.Ident(_) as fn, args) ->
-    let fun_type = analyse fn env non_generic in
-    let arg_types = List.map (fun a -> analyse_highest_fragment a env non_generic) args in
-    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ()) in
+    let fun_type = analyse fn bindings non_generic ~env:env in
+    let arg_types = List.map (fun a -> analyse_highest_fragment a bindings non_generic ~env:env) args in
+    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
     let unifier = (Function.create arg_types result_type_param) in
-    unify unifier fun_type;
+    unify unifier fun_type ~env:env;
     result_type_param
     
   | Expr.Call(_,_) ->
     raise @@ UnificationError "Cannot call anything other than a function"
     
 
-and get_type name env non_generic =
-   if StringMap.mem name env then
-     fresh (StringMap.find name env) non_generic 
+and get_type name bindings non_generic ~env:env =
+   if StringMap.mem name bindings then
+     fresh (StringMap.find name bindings) non_generic ~env:env 
    else if is_integer_literal name then
      my_int
    else
      raise @@ ParseError ("Undefined symbol " ^ name)
 
-and fresh t non_generic : TypeParameter.t =
+and fresh t non_generic ~env:env : TypeParameter.t =
   let mappings = Hashtbl.create 30 in
   let rec freshrec tp : TypeParameter.t =
     let p = prune tp in
@@ -293,7 +287,7 @@ and fresh t non_generic : TypeParameter.t =
       in
       if is_generic tv non_generic_list then begin
         if not (Hashtbl.mem mappings p)  
-        then Hashtbl.replace mappings p (TypeParameter.Tp_tvar (TypeVariable.create ()));
+        then Hashtbl.replace mappings p (TypeParameter.Tp_tvar (TypeVariable.create ~env:env));
         Hashtbl.find mappings p
       end
       else p
@@ -308,7 +302,7 @@ and fresh t non_generic : TypeParameter.t =
  * 
  * Makes the types t1 and t2 the same
  *)
-and unify t1 t2 : unit =
+and unify t1 t2 ~env:env : unit =
   let a = prune t1 in
   let b = prune t2 in
   match (a, b) with
@@ -319,7 +313,7 @@ and unify t1 t2 : unit =
       tv.TypeVariable.instance <- Some b
     end
   | (TypeParameter.Tp_top(top), TypeParameter.Tp_tvar(tv)) ->
-    unify b a
+    unify b a ~env:env
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
     (* Allow the type system to unify lambdas and functions *)
     let top1_name = top1.TypeOperator.name in
@@ -330,9 +324,10 @@ and unify t1 t2 : unit =
        (top1_name <> top2_name) && 
        (top1_name <> Fun.name || top2_name <> Function.name) && 
        (top1_name <> Function.name || top2_name <> Fun.name) then
-       raise @@ TypeError ("Type mismatch: " ^ (TypeOperator.to_string top1) ^ " cannot be unified with " ^ (TypeOperator.to_string top2) )
+       raise @@ TypeError ("Type mismatch: " ^ (TypeOperator.to_string top1 ~env:env) ^ 
+        " cannot be unified with " ^ (TypeOperator.to_string top2 ~env:env) )
     ;      
-    List.iter2 unify (top1.TypeOperator.types) (top2.TypeOperator.types)
+    List.iter2 (unify ~env:env) (top1.TypeOperator.types) (top2.TypeOperator.types)
       
 and prune (t:TypeParameter.t) = 
   match t with
@@ -362,10 +357,10 @@ and is_integer_literal name =
   with Failure _ -> false
 
 
-let try_exp env node =
+let try_exp bindings ~env:env node =
   (try
      Printf.printf "%s \n" (Expr.to_string node);
-     Printf.printf "- : %s\n" (TypeParameter.to_string @@ analyse node env TVSet.empty)
+     Printf.printf "- : %s\n" (TypeParameter.to_string ~env:env @@ analyse node bindings TVSet.empty ~env:env)
    with 
      ParseError e 
    | TypeError e -> 
@@ -374,21 +369,25 @@ let try_exp env node =
 
 
 let () =
-  let var1      = TypeParameter.Tp_tvar ( TypeVariable.create ()) in
-  let var2      = TypeParameter.Tp_tvar ( TypeVariable.create ()) in
-  let pair_type = TypeParameter.Tp_top  ( TypeOperator.create "*" [var1; var2]) in
-  let var3      = TypeParameter.Tp_tvar (TypeVariable.create ()) in
-  let my_env = 
-    StringMap.empty
-    |> StringMap.add "pair" (Fun.create var1 (Fun.create var2 pair_type))
-    |> StringMap.add "true" my_bool
-    |> StringMap.add "cond" (Fun.create my_bool 
-                               (Fun.create var3 
-                                  (Fun.create var3 var3)))
-    |> StringMap.add "zero" (Fun.create my_int my_bool)
-    |> StringMap.add "pred" (Fun.create my_int my_int)
-    |> StringMap.add "times" (Fun.create my_int (Fun.create my_int my_int))
+  let prime_env env = 
+    let var1      = TypeParameter.Tp_tvar ( TypeVariable.create ~env:env) in
+    let var2      = TypeParameter.Tp_tvar ( TypeVariable.create ~env:env) in
+    let pair_type = TypeParameter.Tp_top  ( TypeOperator.create "*" [var1; var2]) in
+    let var3      = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
+    let my_bindings = 
+      StringMap.empty
+      |> StringMap.add "pair" (Fun.create var1 (Fun.create var2 pair_type))
+      |> StringMap.add "true" my_bool
+      |> StringMap.add "cond" (Fun.create my_bool 
+                                 (Fun.create var3 
+                                    (Fun.create var3 var3)))
+      |> StringMap.add "zero" (Fun.create my_int my_bool)
+      |> StringMap.add "pred" (Fun.create my_int my_int)
+      |> StringMap.add "times" (Fun.create my_int (Fun.create my_int my_int))
+    in
+    (env, my_bindings) 
   in
+
   let pair =
     (Expr.Call
        ((Expr.Call (
@@ -510,20 +509,20 @@ let () =
       (* Should fail *)
         Expr.Function(["f"],
           Expr.Fragment("f",Expr.Fragment("g",
-            Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
+            Expr.Apply(Expr.Ident "f", Expr.Ident "g"))));
 
         Expr.Function(["f";"g"],
           Expr.Fragment("f",Expr.Fragment("g",
-            Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
+            Expr.Apply(Expr.Ident "f", Expr.Ident "g"))));
 
         Expr.Function(["f";"g"],
           Expr.Fragment("f",Expr.Fragment("g",
-            Expr.Call(Expr.Ident "g", [Expr.Ident "f"]))));
+            Expr.Call(Expr.Ident "f", [Expr.Ident "g"]))));
 
-        Expr.Function(["f";"g";"h"],
+        Expr.Function(["f";"g";"x"],
           Expr.Fragment("f", Expr.Fragment("g", Expr.Fragment("h",
-            Expr.Call(Expr.Ident "h", [
-                        Expr.Call(Expr.Ident "g", [Expr.Ident "f"])])))));
+            Expr.Call(Expr.Ident "f", [
+                        Expr.Call(Expr.Ident "g", [Expr.Ident "x"])])))));
 
       Expr.Call(
         Expr.Function(
@@ -536,7 +535,13 @@ let () =
         [Expr.Ident "true"; Expr.Ident "true"]);
     ]
   in
-  List.iter (fun ex -> try_exp my_env ex) examples
+  let new_env () = 
+    prime_env { next_variable_id = 0; next_variable_name = 'a'} 
+  in
+
+  List.iter (fun ex -> 
+      let env, bindings = new_env () in
+      try_exp ~env:env bindings ex) examples
 
 
 

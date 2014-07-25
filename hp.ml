@@ -1,12 +1,8 @@
-
-
-(* TODO: Remove Fragment, use only lambda *)
 module Expr = struct
   type t =
     | Ident    of string
     | Apply    of t * t
     | Call     of t * t list
-    | Lambda   of string * t
     | Function of string list * t
     | Fragment of string * t
     | Let      of string * t * t
@@ -16,9 +12,6 @@ module Expr = struct
     | Ident s -> s
     | Apply (fn, arg) -> 
       Printf.sprintf "%s[ %s ]" (to_string fn) (to_string arg)
-
-    | Lambda (v, body) ->
-      Printf.sprintf "(\\ %s -> %s)" v (to_string body)
 
     | Let (v, defn, body) ->
       Printf.sprintf "(let %s = %s in %s)" v (to_string defn) (to_string body)
@@ -121,18 +114,17 @@ end = struct
       | _, [] -> t.name
                    
       | a, _::_::_::_ when a = Function.name -> 
-        t.types
-        |> List.rev
+        t.types |> List.rev
         |> (function
             (* hd is the last element, the return type (reversed, remember?) *)
             | hd::[] -> "() " ^ Function.name ^ " " ^ (TypeParameter.to_string hd)
                                                       
             | hd::tl ->
-              let args_string =  List.fold_left (fun a b -> 
+              let args_string = tl |> List.rev |> List.fold_left (fun a b -> 
                   if a <> "" then 
                     Printf.sprintf "%s %s %s" a Fun.name (TypeParameter.to_string ?depth:(Some (succ lvl)) b) 
                   else 
-                    TypeParameter.to_string ?depth:(Some (succ lvl)) b) "" tl 
+                    TypeParameter.to_string ?depth:(Some (succ lvl)) b) ""
               in
               Printf.sprintf "%s %s %s" args_string Function.name (TypeParameter.to_string ?depth:(Some (succ lvl)) hd)
             | [] -> assert false)
@@ -185,7 +177,6 @@ end = struct
 end
 and Function : sig
   val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
-  val to_binop: TypeParameter.t -> TypeParameter.t
   val name: string
 end = struct
   let name = "+>"
@@ -195,39 +186,9 @@ end = struct
       TypeParameter.Tp_top 
       {
         TypeOperator.name  = name;
-        TypeOperator.types = from_types @ [to_type]
+        TypeOperator.types = (* (List.rev *) from_types(* ) *) @ [to_type]
       }
     | _ -> assert false
-
-  (* let to_string f = *)
-  (*   let rec string_builder = function *)
-  (*     | [] -> assert false *)
-  (*     | e::[] -> " " ^ name ^ " " ^ (TypeParameter.to_string e) *)
-  (*     | x::xs -> (TypeParameter.to_string x) ^ " -> " ^ (string_builder xs) *)
-  (*   in *)
-  (*   Printf.sprintf "%s" (string_builder f.TypeOperator.types) *)
-
-  let to_binop = function
-    | TypeParameter.Tp_tvar _  -> assert false
-    | TypeParameter.Tp_top({TypeOperator.name = n; TypeOperator.types = ts}) when n = name ->
-      (* This is kinda gross, but we need to 
-       * suppress the exhaustive match warnings
-       *)
-      (match List.rev ts with
-       | to_type::rev_arg_types ->
-         (match List.rev rev_arg_types with
-          | (x::xs) ->
-            TypeParameter.Tp_top 
-              {
-                TypeOperator.name  = name;
-                TypeOperator.types = [
-                  (List.fold_left Fun.create x xs);
-                  to_type
-                ]
-              }
-          | _ -> assert false)
-       | _ -> assert false)
-    | TypeParameter.Tp_top _ as t -> t
 end
 
 
@@ -237,13 +198,6 @@ let rec pow a = function
   | n -> 
     let b = pow a (n / 2) in
     b * b * (if n mod 2 = 0 then 1 else a)
-
-let rec zip xl yl = 
-  match (xl, yl) with
-  | (x::xs , y::ys) -> (x, y) :: zip xs ys 
-  | ([],[]) -> []
-  | _ -> assert false
-
 
 
 (* Basic types are constructed with a nullary type constructor *)
@@ -280,8 +234,7 @@ and analyse node env non_generic =
     unify (Fun.create arg_type result_type_param) fun_type;
     result_type_param
     
-  | Expr.Fragment(v, body) 
-  | Expr.Lambda (v, body) -> 
+  | Expr.Fragment(v, body) -> 
     let arg_type = TypeVariable.create () in
     let arg_type_param = TypeParameter.Tp_tvar arg_type in
     let new_env  = StringMap.add v arg_type_param env in
@@ -306,10 +259,11 @@ and analyse node env non_generic =
   | Expr.Function (vl, body) ->
     let arg_types = List.map (fun _ -> TypeVariable.create ()) vl in
     let arg_type_params = List.map (fun t -> TypeParameter.Tp_tvar t) arg_types in
-    let new_env = List.fold_left2 (fun m e at -> StringMap.add e at m) env vl arg_type_params in
-    let new_non_generic = List.fold_left (fun s e -> TVSet.add e s) non_generic arg_types in
+    let new_env = List.fold_right2 StringMap.add vl arg_type_params env in
+    let new_non_generic = List.fold_right TVSet.add arg_types non_generic in
     (* let result_type = analyse body new_env new_non_generic in *)
     let result_type = analyse_lowest_fragment body new_env new_non_generic in
+    (* (List.iter (fun x -> x |> TypeParameter.to_string |> print_endline ) arg_type_params); *)
     Function.create arg_type_params result_type
 
   (* A function passed no arguments passes the empty tuple to
@@ -593,15 +547,18 @@ let () =
           Expr.Fragment("f",Expr.Fragment("g",
             Expr.Call(Expr.Ident "g", [Expr.Ident "f"]))));
 
+        Expr.Function(["f";"g";"h"],
+          Expr.Fragment("f", Expr.Fragment("g", Expr.Fragment("h",
+            Expr.Call(Expr.Ident "h", [
+                        Expr.Call(Expr.Ident "g", [Expr.Ident "f"])])))));
+
       Expr.Call(
         Expr.Function(
           ["f"; "z"],
           Expr.Fragment("f",
             Expr.Fragment("z",
-              Expr.Function(
-                ["g"],
-                Expr.Fragment(
-                  "g",
+              Expr.Function(["g"],
+                Expr.Fragment("g",
                   Expr.Ident "g"))))),
         [Expr.Ident "true"; Expr.Ident "true"]);
     ]

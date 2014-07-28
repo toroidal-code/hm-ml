@@ -22,8 +22,15 @@ Functions are n-ary constructs. They are composed of multiple "fragments", which
 
 Underneath, this can be represented as
 
-    Function(["f","g"],
+    Function(
         Fragment("f",
             Fragment("g",
                 Call(Ident("g"),
-                      Ident("f")))))
+                    [Ident("f")]))))
+
+A function with no arguments is represented with one fragment that takes an empty tuple
+
+	fn() -> true
+
+	Function(
+		Fragment("", Ident "true"))

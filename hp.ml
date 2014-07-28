@@ -293,9 +293,7 @@ and analyse node ~env:env bindings non_generic : TypeParameter.t =
    *)
   | Expr.Function (body) ->
     let fragment_type = analyse_highest_fragment body bindings non_generic ~env:env in
-    let func = Function.create @@ extract_function_types fragment_type in
-    (* print_endline @@ TypeParameter.to_string func ~env:env; *)
-    func
+    Function.create @@ extract_function_types fragment_type
 
   (* A function passed no arguments passes the empty tuple to
    * its first fragment (unit type).
@@ -307,20 +305,18 @@ and analyse node ~env:env bindings non_generic : TypeParameter.t =
     unify (Fun.create arg_type result_type_param) fn_type ~env:env;
     result_type_param
 
-  | Expr.Call(Expr.Function(_) as fn, args) (* -> *)
-  | Expr.Call(Expr.Call(_,_) as fn, args)
-  | Expr.Call(Expr.Ident(_) as fn, args) ->
-    let fun_type          = analyse fn bindings non_generic ~env:env in
-    let arg_types = 
-      List.map (fun a -> analyse_highest_fragment a bindings non_generic ~env:env) args 
-    in
-    let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
-    let unifier = (Function.create (arg_types@[result_type_param])) in
+  | Expr.Call(fn, args) ->
+    let fun_type  = analyse fn bindings non_generic ~env:env in
+    let arg_types = List.map (fun a -> analyse a bindings non_generic ~env:env) args in
+    (* if arg_types <> List.length args then *)
+    (*   raise @@ TypeError "argument arity mismatch"; *)
+    let result_type_param = TypeParameter.Tp_tvar(TypeVariable.create ~env:env) in
+    let unifier = Function.create @@ arg_types@[result_type_param] in
     unify unifier fun_type ~env:env;
     result_type_param
     
-  | Expr.Call(_,_) ->
-    raise @@ UnificationError "Cannot call anything other than a function"
+  (* | Expr.Call(_,_) -> *)
+  (*   raise @@ UnificationError "Cannot call anything other than a function" *)
     
 
 and get_type name bindings non_generic ~env:env =
@@ -370,19 +366,20 @@ and unify t1 t2 ~env:env : unit =
   | (TypeParameter.Tp_top(top), TypeParameter.Tp_tvar(tv)) ->
     unify b a ~env:env
   | (TypeParameter.Tp_top(top1), TypeParameter.Tp_top(top2)) ->
-    (* Allow the type system to unify lambdas and functions *)
     let top1_name = top1.TypeOperator.name in
     let top2_name = top2.TypeOperator.name in
     let top1_types_size = (List.length top1.TypeOperator.types) in
     let top2_types_size = (List.length top2.TypeOperator.types) in
-    if (top1_types_size <> top2_types_size) ||
-       (top1_name <> top2_name) (* && *)
-       (* (top1_name <> Fun.name || top2_name <> Function.name) && *)
-       (* (top1_name <> Function.name || top2_name <> Fun.name) *) then
-       raise @@ TypeError ("Type mismatch: \n\tActual: " ^ (TypeOperator.to_string top1 ~env:env) ^ 
-        "\n\tExpected: " ^ (TypeOperator.to_string top2 ~env:env) )
-    ;      
-    List.iter2 (unify ~env:env) (top1.TypeOperator.types) (top2.TypeOperator.types)
+    if top1_types_size <> top2_types_size then 
+      raise @@ TypeError ("Arity mismatch: \n" ^ 
+                          "\tActual: " ^ string_of_int (top1_types_size - 1) ^ "\n" ^ 
+                          "\tExpected: " ^ string_of_int (top2_types_size - 1))
+    else if top1_name <> top2_name then
+      raise @@ TypeError ("Type mismatch: \n" ^ 
+                          "\tActual: " ^ (TypeOperator.to_string top1 ~env:env) ^ "\n" ^ 
+                          "\tExpected: " ^ (TypeOperator.to_string top2 ~env:env) )
+    else
+      List.iter2 (unify ~env:env) (top1.TypeOperator.types) (top2.TypeOperator.types)
       
 and prune (t:TypeParameter.t) = 
   match t with

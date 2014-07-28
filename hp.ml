@@ -3,7 +3,7 @@ module Expr = struct
     | Ident    of string
     | Apply    of t * t
     | Call     of t * t list
-    | Function of string list * t
+    | Function of t
     | Fragment of string * t
     | Letrec   of string * t * t
 
@@ -15,9 +15,13 @@ module Expr = struct
     | Letrec (v, defn, body) ->
       Printf.sprintf "let %s = %s in %s" v (to_string defn) (to_string body)
 
-    | Function (vl, body) ->
+    | Function (body) ->
+      let rec extract_args = function
+        | Fragment(a,b) -> a :: extract_args b
+        | _ -> []
+      in
       Printf.sprintf "fn(%s) { %s }" 
-        (List.fold_left (fun a b -> (if a <> "" then a ^ ", " else a) ^ b ) "" vl)
+        (List.fold_left (fun a b -> (if a <> "" then a ^ ", " else a) ^ b ) "" (extract_args body))
         (to_string body)
  
     | Fragment (v, body) -> (to_string body) 
@@ -49,6 +53,7 @@ module rec TypeVariable : sig
   val compare: t -> t -> int
   val hash: t -> int
   val equal: t -> t -> bool
+  val extract_instance : t -> TypeParameter.t
 end = struct
   type t =
     {
@@ -76,6 +81,11 @@ end = struct
     match tv.instance with
     | None -> name ~env:env tv
     | Some i -> TypeParameter.to_string ?depth:(Some lvl) ~env:env i
+
+
+  let extract_instance = function
+    | { instance = Some(i) } -> i
+    | _ -> assert false
 
   let compare t1 t2 = t2.id - t1.id
   let hash tv = tv.id
@@ -142,6 +152,8 @@ end
 and TypeParameter : sig
   type t = Tp_tvar of TypeVariable.t | Tp_top  of TypeOperator.t
   val to_string: ?depth:int -> env:env -> t -> string
+  val extract_tv: t -> TypeVariable.t
+  val extract_top: t -> TypeOperator.t
 end = struct
   type t =
     | Tp_tvar of TypeVariable.t
@@ -150,6 +162,14 @@ end = struct
   let to_string ?depth:(lvl=0) ~env:env = function 
     | Tp_tvar tv -> TypeVariable.to_string ?depth:(Some lvl) ~env:env tv
     | Tp_top top -> TypeOperator.to_string ?depth:(Some lvl) ~env:env top
+
+  let extract_tv = function
+    | Tp_tvar tv -> tv
+    | Tp_top _ -> assert false
+
+  let extract_top = function
+    | Tp_top top -> top
+    | Tp_tvar _ -> assert false
 end
 
 and Fun : sig 
@@ -166,19 +186,16 @@ end = struct
 
 end
 and Function : sig
-  val create: TypeParameter.t list -> TypeParameter.t -> TypeParameter.t
+  val create: TypeParameter.t list -> TypeParameter.t
   val name: string
 end = struct
   let name = "+>"
-  let create from_types to_type = 
-    match from_types with 
-    | x::xs ->
+  let create types = 
       TypeParameter.Tp_top 
       {
         TypeOperator.name  = name;
-        TypeOperator.types = from_types @ [to_type]
+        TypeOperator.types = types
       }
-    | _ -> assert false
 end
 
 (* Basic types are constructed with a nullary type constructor *)
@@ -193,6 +210,10 @@ exception ParseError of string
 exception TypeError of string
 exception UnificationError of string
 
+let print_stringmap bindings ~env:env : unit =
+  StringMap.iter (fun k v -> print_endline (k ^ " => " ^ (TypeParameter.to_string v ~env:env))) bindings;
+  print_endline ""
+
 let rec analyse_lowest_fragment ~env:env node bindings non_generic =
   match node with
   | Expr.Fragment (_,b) -> analyse_lowest_fragment b bindings non_generic ~env:env 
@@ -200,67 +221,101 @@ let rec analyse_lowest_fragment ~env:env node bindings non_generic =
 
 and analyse_highest_fragment node ~env:env bindings non_generic =
   match node with
-  | Expr.Function(_,b) -> analyse_highest_fragment b bindings non_generic ~env:env 
+  | Expr.Function(b) -> analyse_highest_fragment b bindings non_generic ~env:env 
   | e -> analyse e bindings non_generic ~env:env 
 
 (* and analyse_call analyzer env non_generic = *)
-
-
+and extract_function_types = function
+    | TypeParameter.Tp_top({ 
+          TypeOperator.name = name;
+          TypeOperator.types = arg::body::[] 
+        }) when name = Fun.name ->
+      let tail = match extract_function_types body with
+        | [] -> [body]
+        | t -> t
+      in
+      arg :: tail
+      
+    | _ -> []
 
 and analyse node ~env:env bindings non_generic : TypeParameter.t = 
   match node with
-  | Expr.Ident name -> get_type name bindings non_generic ~env:env
+  | Expr.Ident name -> 
+    get_type name bindings non_generic ~env:env
 
   | Expr.Apply (fn, arg) -> 
-    let fun_type = analyse_highest_fragment fn bindings non_generic ~env:env in
-    let arg_type = analyse_highest_fragment arg bindings non_generic ~env:env in
-    let result_type_param = TypeParameter.Tp_tvar(TypeVariable.create ~env:env) in
-    unify (Fun.create arg_type result_type_param) fun_type ~env:env;
-    result_type_param
+    let fun_type          = analyse fn bindings non_generic ~env:env in
+    let arg_type          = analyse arg bindings non_generic ~env:env in
+    (match fun_type with
+     | TypeParameter.Tp_top({ TypeOperator.name = name; TypeOperator.types = _::ttl }) 
+       when name = Function.name -> 
+       let result_type_params = List.map (fun _ -> TypeParameter.Tp_tvar(TypeVariable.create ~env:env)) ttl in
+       let func = Function.create @@ arg_type::result_type_params in
+       unify func fun_type ~env:env;
+       (match result_type_params with 
+        | x::[] -> x
+        | _ -> Function.create result_type_params)
+
+         
+     | _ -> 
+       let result_type_param = TypeParameter.Tp_tvar(TypeVariable.create ~env:env) in
+       let func = Fun.create arg_type result_type_param in
+       unify func fun_type ~env:env;
+       result_type_param
+      )
     
   | Expr.Fragment(v, body) -> 
-    let arg_type = TypeVariable.create ~env:env  in
-    let arg_type_param = TypeParameter.Tp_tvar arg_type in
-    let new_env  = StringMap.add v arg_type_param bindings in
+    (* Printf.printf "Analysing frag\n"; *)
+    let arg_type        = TypeVariable.create ~env:env  in
+    let arg_type_param  = TypeParameter.Tp_tvar arg_type in
+    let new_bindings    = StringMap.add v arg_type_param bindings in
     let new_non_generic = TVSet.add arg_type non_generic in
-    let result_type = analyse body new_env new_non_generic ~env:env in
+    let result_type     = analyse body new_bindings new_non_generic ~env:env in
     Fun.create arg_type_param result_type
 
   
   | Expr.Letrec (v, defn, body) ->
-    let new_type = TypeVariable.create ~env:env in
-    let new_type_param = TypeParameter.Tp_tvar new_type in
-    let new_env  = StringMap.add v new_type_param bindings in
+    let new_type        = TypeVariable.create ~env:env in
+    let new_type_param  = TypeParameter.Tp_tvar new_type in
+    let new_env         = StringMap.add v new_type_param bindings in
     let new_non_generic = TVSet.add new_type non_generic in
-    let defn_type = analyse defn new_env new_non_generic ~env:env in
+    let defn_type       = analyse defn new_env new_non_generic ~env:env in
     unify new_type_param defn_type ~env:env;
     analyse body new_env non_generic ~env:env
 
-  | Expr.Function (vl, body) ->
-    let arg_types = List.map (fun _ -> TypeVariable.create ~env:env) vl in
-    let arg_type_params = List.map (fun t -> TypeParameter.Tp_tvar t) arg_types in
-    let new_env = List.fold_right2 StringMap.add vl arg_type_params bindings in
-    let new_non_generic = List.fold_right TVSet.add arg_types non_generic in
-    let result_type = analyse_lowest_fragment body new_env new_non_generic ~env:env in
-    Function.create arg_type_params result_type
+
+  (**
+   * This match branch deals with functions.
+   * The type of a function is derived from the types of all the constituent
+   * fragments' arguments and the final fragment.
+   * e.g 
+   * frag1arg -> frag2arg ... fragNarg +> fragNbody
+   *)
+  | Expr.Function (body) ->
+    let fragment_type = analyse_highest_fragment body bindings non_generic ~env:env in
+    let func = Function.create @@ extract_function_types fragment_type in
+    (* print_endline @@ TypeParameter.to_string func ~env:env; *)
+    func
 
   (* A function passed no arguments passes the empty tuple to
    * its first fragment (unit type).
    *)
-  | Expr.Call (Expr.Function(vl,f), []) ->
+  | Expr.Call (Expr.Function(f), []) ->
     let fn_type = analyse f bindings non_generic ~env:env in
     let arg_type = my_unit in
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
     unify (Fun.create arg_type result_type_param) fn_type ~env:env;
     result_type_param
 
-  | Expr.Call(Expr.Function(_,_) as fn, args) (* -> *)
+  | Expr.Call(Expr.Function(_) as fn, args) (* -> *)
   | Expr.Call(Expr.Call(_,_) as fn, args)
   | Expr.Call(Expr.Ident(_) as fn, args) ->
-    let fun_type = analyse fn bindings non_generic ~env:env in
-    let arg_types = List.map (fun a -> analyse_highest_fragment a bindings non_generic ~env:env) args in
+    let fun_type          = analyse fn bindings non_generic ~env:env in
+    let arg_types = 
+      List.map (fun a -> analyse_highest_fragment a bindings non_generic ~env:env) args 
+    in
     let result_type_param = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
-    let unifier = (Function.create arg_types result_type_param) in
+    let unifier = (Function.create (arg_types@[result_type_param])) in
     unify unifier fun_type ~env:env;
     result_type_param
     
@@ -269,12 +324,12 @@ and analyse node ~env:env bindings non_generic : TypeParameter.t =
     
 
 and get_type name bindings non_generic ~env:env =
-   if StringMap.mem name bindings then
-     fresh (StringMap.find name bindings) non_generic ~env:env 
-   else if is_integer_literal name then
-     my_int
-   else
-     raise @@ ParseError ("Undefined symbol " ^ name)
+  if StringMap.mem name bindings then
+    fresh (StringMap.find name bindings) non_generic ~env:env 
+  else if is_integer_literal name then
+    my_int
+  else
+    raise @@ ParseError ("Undefined symbol " ^ name)
 
 and fresh t non_generic ~env:env : TypeParameter.t =
   let mappings = Hashtbl.create 30 in
@@ -321,11 +376,11 @@ and unify t1 t2 ~env:env : unit =
     let top1_types_size = (List.length top1.TypeOperator.types) in
     let top2_types_size = (List.length top2.TypeOperator.types) in
     if (top1_types_size <> top2_types_size) ||
-       (top1_name <> top2_name) && 
-       (top1_name <> Fun.name || top2_name <> Function.name) && 
-       (top1_name <> Function.name || top2_name <> Fun.name) then
-       raise @@ TypeError ("Type mismatch: " ^ (TypeOperator.to_string top1 ~env:env) ^ 
-        " cannot be unified with " ^ (TypeOperator.to_string top2 ~env:env) )
+       (top1_name <> top2_name) (* && *)
+       (* (top1_name <> Fun.name || top2_name <> Function.name) && *)
+       (* (top1_name <> Function.name || top2_name <> Fun.name) *) then
+       raise @@ TypeError ("Type mismatch: \n\tActual: " ^ (TypeOperator.to_string top1 ~env:env) ^ 
+        "\n\tExpected: " ^ (TypeOperator.to_string top2 ~env:env) )
     ;      
     List.iter2 (unify ~env:env) (top1.TypeOperator.types) (top2.TypeOperator.types)
       
@@ -370,66 +425,60 @@ let try_exp bindings ~env:env node =
 
 let () =
   let prime_env env = 
-    let var1      = TypeParameter.Tp_tvar ( TypeVariable.create ~env:env) in
-    let var2      = TypeParameter.Tp_tvar ( TypeVariable.create ~env:env) in
-    let pair_type = TypeParameter.Tp_top  ( TypeOperator.create "*" [var1; var2]) in
+    let var1      = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
+    let var2      = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
+    let pair_type = TypeParameter.Tp_top  (TypeOperator.create "*" [var1; var2]) in
     let var3      = TypeParameter.Tp_tvar (TypeVariable.create ~env:env) in
     let my_bindings = 
       StringMap.empty
-      |> StringMap.add "pair" (Fun.create var1 (Fun.create var2 pair_type))
+      |> StringMap.add "pair" @@ Function.create [var1; var2; pair_type]
       |> StringMap.add "true" my_bool
-      |> StringMap.add "cond" (Fun.create my_bool 
-                                 (Fun.create var3 
-                                    (Fun.create var3 var3)))
-      |> StringMap.add "zero" (Fun.create my_int my_bool)
-      |> StringMap.add "pred" (Fun.create my_int my_int)
-      |> StringMap.add "times" (Fun.create my_int (Fun.create my_int my_int))
+      |> StringMap.add "cond" @@ Function.create [my_bool; var3; (Function.create [var3; var3])]
+      |> StringMap.add "zero" @@ Function.create [my_int; my_bool]
+      |> StringMap.add "pred" @@ Function.create [my_int; my_int]
+      |> StringMap.add "times" @@ Function.create [my_int; my_int; my_int]
     in
     (env, my_bindings) 
   in
 
   let pair =
-    (Expr.Call
-       ((Expr.Call (
-            Expr.Ident "pair",
-          [(Expr.Call 
-             ((Expr.Ident "f"), [(Expr.Ident "4")]))])),
-        [(Expr.Call
-           (Expr.Ident "f",
-            [Expr.Ident "true"]))]))
+       Expr.Call (
+        Expr.Ident "pair",
+        [Expr.Call 
+            (Expr.Ident "f", [Expr.Ident "4"]);
+         Expr.Call
+           (Expr.Ident "f", [Expr.Ident "true"])])
   in
   
   let examples =
-    [
-      (* factorial *)
-      (Expr.Letrec              (* letrec factorial = *)
-         ("factorial",
-          Expr.Function(["n"],  (* fun n -> *)
-            Expr.Fragment("n",
-             Expr.Apply (
-               Expr.Apply (     (* cond (zero n) 1 *)
-                 Expr.Apply     (* cond (zero n) *)
-                   (Expr.Ident "cond",
-                    Expr.Apply (Expr.Ident "zero", Expr.Ident "n")),
-                 Expr.Ident "1"),
-               Expr.Apply (     (* times n *)
-                 Expr.Apply (Expr.Ident "times", Expr.Ident "n"),
-                 Expr.Apply (
-                   Expr.Ident "factorial",
-                   Expr.Apply (Expr.Ident "pred", Expr.Ident "n")
-                 ))))),          (* in *)
-          Expr.Apply (Expr.Ident "factorial", Expr.Ident "5")));
+    [ 
+      (* (\* factorial *\) *)
+      (* (Expr.Letrec              (\* letrec factorial = *\) *)
+      (*    ("factorial", *)
+      (*     Expr.Function(        (\* fun n -> *\) *)
+      (*       Expr.Fragment("n", *)
+      (*        Expr.Apply ( *)
+      (*          Expr.Apply (     (\* cond (zero n) 1 *\) *)
+      (*            Expr.Apply     (\* cond (zero n) *\) *)
+      (*              (Expr.Ident "cond", *)
+      (*               Expr.Apply (Expr.Ident "zero", Expr.Ident "n")), *)
+      (*            Expr.Ident "1"), *)
+      (*          Expr.Apply (     (\* times n *\) *)
+      (*            Expr.Apply (Expr.Ident "times", Expr.Ident "n"), *)
+      (*            Expr.Apply ( *)
+      (*              Expr.Ident "factorial", *)
+      (*              Expr.Apply (Expr.Ident "pred", Expr.Ident "n") *)
+      (*            ))))),          (\* in *\) *)
+      (*     Expr.Apply (Expr.Ident "factorial", Expr.Ident "5"))); *)
       
       (* Should fail
-       * fun x -> (pair (x 3) (x true))
+       * fun x -> pair(x(3), x(true))
        *)
-      Expr.Function(["x"],
-        Expr.Fragment(
-          "x",
-          Expr.Apply(
-            Expr.Call(Expr.Ident "pair",
-                      [Expr.Call(Expr.Ident "x", [Expr.Ident "3"])]),
-            Expr.Call(Expr.Ident "x", [Expr.Ident "true"]))));
+      Expr.Function(
+        Expr.Fragment("x",
+          Expr.Call(Expr.Ident "pair",
+                    [Expr.Call(Expr.Ident "x", [Expr.Ident "3"]); 
+                     Expr.Call(Expr.Ident "x", [Expr.Ident "true"])])));
 
       (* (pair (f 3)) (f true) *)
       Expr.Apply(
@@ -438,31 +487,40 @@ let () =
       
       (* let f = (fn x -> x) in ((pair (f 4)) (f true)) *)
       Expr.Letrec("f",
-        Expr.Function(["x"],
+        Expr.Function(
           Expr.Fragment("x",
             Expr.Ident "x")), pair);
       
       (* fun f -> f f *)
       (* This should fail (recursive type definition) *)
-      Expr.Function(["f"],
+      Expr.Function(
         Expr.Fragment("f",
           Expr.Call(Expr.Ident "f", [Expr.Ident "f"])));
       
       (* should fail *)
-      (* let g = fun f -> 5 in g (g,true) *)
-      Expr.Letrec("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+      (* let g = fun f -> 5 in g(g,true) *)
+      Expr.Letrec("g", Expr.Function(Expr.Fragment("f", Expr.Ident "5")),
         Expr.Call(Expr.Ident "g", [Expr.Ident "g"; Expr.Ident "true"]));
 
-      (* let g = fun f -> 5 in g (g) *)
-      Expr.Letrec("g", Expr.Function(["f"], Expr.Fragment("f", Expr.Ident "5")),
+      (* let g = fun f -> 5 in g(g) *)
+      Expr.Letrec("g", Expr.Function(Expr.Fragment("f", Expr.Ident "5")),
         Expr.Call(Expr.Ident "g", [Expr.Ident "g"]));
+
+      (* let g = fun f -> 5 in g[g] *)
+      Expr.Letrec("g", Expr.Function(Expr.Fragment("f", Expr.Ident "5")),
+        Expr.Apply(Expr.Ident "g", Expr.Ident "g"));
+
+
+      Expr.Apply(Expr.Function( Expr.Fragment("f", Expr.Ident "f")), 
+                 Expr.Ident "2");
+
 
       (* example that demonstrates generic and non-generic variables *)
       (* fun g -> let f = fun x -> g in pair (f 3, f true) *)
-      Expr.Function(["g"],
+      Expr.Function(
         Expr.Fragment("g",
           Expr.Letrec("f",
-            Expr.Function(["x"], 
+            Expr.Function(
               Expr.Fragment("x",
                 Expr.Ident "g")),
             Expr.Apply(
@@ -473,66 +531,77 @@ let () =
       
       (* function composition *)
       (* fun f -> fun g -> fun arg -> f g arg *)
-      Expr.Function(["f";"g";"arg"],
+      Expr.Function(
+        Expr.Fragment("f",
         Expr.Fragment("g",
           Expr.Fragment("arg",
             Expr.Apply(
               Expr.Ident "g",
               Expr.Apply(
                 Expr.Ident "f",
-                Expr.Ident "arg")))));
+                Expr.Ident "arg"))))));
 
-      Expr.Function(["f"],
+      Expr.Function(
         Expr.Fragment("f",
-          Expr.Function(["g"],
+          Expr.Function(
             Expr.Fragment("g", Expr.Ident "g"))));
       
       Expr.Apply(
-        Expr.Function(["f"],
+        Expr.Function(
           Expr.Fragment("f",
-            Expr.Function(["g"],
+            Expr.Function(
               Expr.Fragment("g", Expr.Ident "g")))),
         Expr.Ident "true");
 
       Expr.Call(
-        Expr.Function(["f"],
+        Expr.Function(
           Expr.Fragment("f",
-            Expr.Function(["g"],
+            Expr.Function(
               Expr.Fragment("g", Expr.Ident "g")))),
         [Expr.Ident "true"]);
 
       Expr.Function(
-        ["f"; "g"],
         Expr.Fragment("f", Expr.Fragment("g",
             Expr.Apply(Expr.Ident "g", Expr.Ident "f"))));
 
-      (* Should fail *)
-        Expr.Function(["f"],
+        Expr.Function(
           Expr.Fragment("f",Expr.Fragment("g",
             Expr.Apply(Expr.Ident "f", Expr.Ident "g"))));
 
-        Expr.Function(["f";"g"],
-          Expr.Fragment("f",Expr.Fragment("g",
-            Expr.Apply(Expr.Ident "f", Expr.Ident "g"))));
-
-        Expr.Function(["f";"g"],
+        Expr.Function(
           Expr.Fragment("f",Expr.Fragment("g",
             Expr.Call(Expr.Ident "f", [Expr.Ident "g"]))));
 
-        Expr.Function(["f";"g";"x"],
+        Expr.Function(
           Expr.Fragment("f", Expr.Fragment("g", Expr.Fragment("h",
             Expr.Call(Expr.Ident "f", [
-                        Expr.Call(Expr.Ident "g", [Expr.Ident "x"])])))));
+                        Expr.Call(Expr.Ident "g", [Expr.Ident "h"])])))));
+
+
+        Expr.Function(
+          Expr.Fragment("f",
+            Expr.Fragment("z",
+              Expr.Function(
+                Expr.Fragment("g",
+                  Expr.Ident "g")))));
 
       Expr.Call(
         Expr.Function(
-          ["f"; "z"],
           Expr.Fragment("f",
             Expr.Fragment("z",
-              Expr.Function(["g"],
+              Expr.Function(
                 Expr.Fragment("g",
                   Expr.Ident "g"))))),
         [Expr.Ident "true"; Expr.Ident "true"]);
+
+      Expr.Apply(
+        Expr.Function(
+          Expr.Fragment("f",
+            Expr.Fragment("z",
+              Expr.Function(
+                Expr.Fragment("g",
+                  Expr.Ident "g"))))),
+        Expr.Ident "true");
     ]
   in
   let new_env () = 
